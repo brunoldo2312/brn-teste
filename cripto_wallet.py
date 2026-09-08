@@ -3,145 +3,106 @@ import json
 import secrets
 import base64
 import os
-from ecdsa import SigningKey, VerifyingKey, SECP256k1, BadSignatureError
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.fernet import Fernet
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
-try:
-    from cryptography.fernet import Fernet, InvalidToken
-    FERNET_AVAILABLE = True
-except ImportError:
-    FERNET_AVAILABLE = False
-    print("⚠️ AVISO: Instale 'cryptography' para seguranca adequada: pip install cryptography")
 
-class WalletManager:
-    @staticmethod
-    def generate_keypair():
-        """Gera par de chaves ECDSA (SECP256k1)"""
-        sk = SigningKey.generate(curve=SECP256k1)
-        vk = sk.verifying_key
-        sk_hex = sk.to_string().hex()
-        vk_hex = vk.to_string().hex()
-        
-        # Endereço derivado do hash SHA256 da chave publica
-        pk_hash = hashlib.sha256(bytes.fromhex(vk_hex)).hexdigest()
-        address = f"brn1{pk_hash[:40]}"
-        return {
-            "address": address,
-            "spend_secret_key": sk_hex,
-            "public_key": vk_hex
-        }
+class Wallet:
+    def __init__(self):
+        self.private_key = None
+        self.public_key = None
+        self.address = None
+        self._generate_keypair()
 
-    @staticmethod
-    def sign_transaction(private_key_hex: str, message_dict: dict) -> str:
-        """Assina digitalmente uma transacao"""
-        sk = SigningKey.from_string(bytes.fromhex(private_key_hex), curve=SECP256k1)
-        msg_bytes = json.dumps(message_dict, sort_keys=True).encode('utf-8')
-        signature = sk.sign(msg_bytes)
-        return signature.hex()
+    def _generate_keypair(self):
+        """Gera par de chaves ECDSA (curva SECP256k1)."""
+        private = ec.generate_private_key(ec.SECP256K1(), default_backend())
+        self.private_key = private
+        public = private.public_key()
+        self.public_key = public
+        # Endereço = hash SHA256 da chave pública (hex)
+        pub_bytes = public.public_bytes(
+            encoding=serialization.Encoding.X962,
+            format=serialization.PublicFormat.UncompressedPoint
+        )
+        self.address = hashlib.sha256(pub_bytes).hexdigest()[:40]
 
-    @staticmethod
-    def verify_signature(public_key_hex: str, message_dict: dict, signature_hex: str) -> bool:
-        """Valida a assinatura digital de uma transacao"""
+    def sign_transaction(self, tx_dict):
+        """Assina uma transação com a chave privada."""
+        tx_string = json.dumps(tx_dict, sort_keys=True).encode()
+        signature = self.private_key.sign(tx_string, ec.ECDSA(hashes.SHA256()))
+        return base64.b64encode(signature).decode()
+
+    def verify_transaction(self, tx_dict):
+        """Verifica a assinatura de uma transação."""
+        if "signature" not in tx_dict:
+            return False
+        signature = base64.b64decode(tx_dict["signature"])
+        tx_copy = {k: v for k, v in tx_dict.items() if k != "signature"}
+        tx_bytes = json.dumps(tx_copy, sort_keys=True).encode()
+        pub_key_pem = tx_dict.get("public_key")
+        if not pub_key_pem:
+            return False
         try:
-            vk = VerifyingKey.from_string(bytes.fromhex(public_key_hex), curve=SECP256k1)
-            msg_bytes = json.dumps(message_dict, sort_keys=True).encode('utf-8')
-            return vk.verify(bytes.fromhex(signature_hex), msg_bytes)
-        except (BadSignatureError, Exception):
+            public_key = serialization.load_pem_public_key(pub_key_pem.encode(), backend=default_backend())
+            public_key.verify(signature, tx_bytes, ec.ECDSA(hashes.SHA256()))
+            return True
+        except InvalidSignature:
+            return False
+        except Exception:
             return False
 
-    @staticmethod
-    def _derive_key(password: str, salt: bytes) -> bytes:
-        key = password.encode()
-        for _ in range(5000):
-            key = hashlib.sha256(key + salt).digest()
-        return key
+    def get_public_key_pem(self):
+        return self.public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode()
 
-    @classmethod
-    def save_encrypted_wallet(cls, filename, password, address, spend_secret_key, public_key=""):
-        try:
-            if not filename.endswith(".wallet"):
-                filename += ".wallet"
-            
-            wallet_data = {
-                "address": address, 
-                "spend_secret_key": spend_secret_key,
-                "public_key": public_key
-            }
-            raw_json = json.dumps(wallet_data).encode('utf-8')
-            
-            if FERNET_AVAILABLE:
-                salt = secrets.token_bytes(16)
-                key = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000)
-                key_b64 = base64.b64encode(key[:32])
-                cipher = Fernet(key_b64)
-                ciphertext = cipher.encrypt(raw_json)
-                
-                file_payload = {
-                    "method": "fernet",
-                    "salt": base64.b64encode(salt).decode('utf-8'),
-                    "ciphertext": base64.b64encode(ciphertext).decode('utf-8')
-                }
-            else:
-                salt = secrets.token_bytes(16)
-                key = cls._derive_key(password, salt)
-                cipher_stream = hashlib.sha256(key).digest()
-                encrypted_bytes = bytearray()
-                for i in range(len(raw_json)):
-                    if i % 32 == 0 and i > 0:
-                        cipher_stream = hashlib.sha256(cipher_stream + key).digest()
-                    encrypted_bytes.append(raw_json[i] ^ cipher_stream[i % 32])
-                file_payload = {
-                    "method": "xor",
-                    "salt": base64.b64encode(salt).decode('utf-8'),
-                    "ciphertext": base64.b64encode(encrypted_bytes).decode('utf-8')
-                }
-                
-            with open(filename, "w") as f:
-                json.dump(file_payload, f)
-            return {"status": "sucesso", "message": f"Arquivo {filename} salvo com seguranca!"}
-        except Exception as e:
-            return {"status": "erro", "message": str(e)}
+    def encrypt_wallet(self, password):
+        """Criptografa a chave privada com Fernet (PBKDF2)."""
+        salt = os.urandom(16)
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        f = Fernet(key)
+        data = {
+            "private_key": self.private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            ).decode(),
+            "address": self.address
+        }
+        encrypted = f.encrypt(json.dumps(data).encode())
+        return {"salt": base64.b64encode(salt).decode(), "data": base64.b64encode(encrypted).decode()}
 
-    @classmethod
-    def load_encrypted_wallet(cls, filename, password):
-        try:
-            if not filename.endswith(".wallet"):
-                filename += ".wallet"
-            if not os.path.exists(filename):
-                return {"status": "erro", "message": "Arquivo nao encontrado."}
-                
-            with open(filename, "r") as f:
-                file_payload = json.load(f)
-                
-            method = file_payload.get("method", "xor")
-            salt = base64.b64decode(file_payload["salt"])
-            ciphertext = base64.b64decode(file_payload["ciphertext"])
-            
-            if method == "fernet" and FERNET_AVAILABLE:
-                key = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 100000)
-                key_b64 = base64.b64encode(key[:32])
-                try:
-                    cipher = Fernet(key_b64)
-                    decrypted_data = json.loads(cipher.decrypt(ciphertext).decode('utf-8'))
-                except InvalidToken:
-                    return {"status": "erro", "message": "Senha incorreta."}
-            else:
-                key = cls._derive_key(password, salt)
-                cipher_stream = hashlib.sha256(key).digest()
-                decrypted_bytes = bytearray()
-                for i in range(len(ciphertext)):
-                    if i % 32 == 0 and i > 0:
-                        cipher_stream = hashlib.sha256(cipher_stream + key).digest()
-                    decrypted_bytes.append(ciphertext[i] ^ cipher_stream[i % 32])
-                try:
-                    decrypted_data = json.loads(decrypted_bytes.decode('utf-8'))
-                except (json.JSONDecodeError, UnicodeDecodeError):
-                    return {"status": "erro", "message": "Senha incorreta."}
-
-            return {
-                "status": "sucesso",
-                "address": decrypted_data["address"],
-                "spend_secret_key": decrypted_data["spend_secret_key"],
-                "public_key": decrypted_data.get("public_key", "")
-            }
-        except Exception as e:
-            return {"status": "erro", "message": f"Erro ao carregar carteira: {str(e)}"}
+    def decrypt_wallet(self, encrypted_data, password):
+        """Descriptografa e restaura a carteira."""
+        salt = base64.b64decode(encrypted_data["salt"])
+        data = base64.b64decode(encrypted_data["data"])
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+        )
+        key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
+        f = Fernet(key)
+        decrypted = f.decrypt(data)
+        wallet_data = json.loads(decrypted.decode())
+        self.private_key = serialization.load_pem_private_key(
+            wallet_data["private_key"].encode(),
+            password=None,
+            backend=default_backend()
+        )
+        self.public_key = self.private_key.public_key()
+        self.address = wallet_data["address"]
