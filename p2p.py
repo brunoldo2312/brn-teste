@@ -233,3 +233,4 @@ class PeerManager:
             if host in ("127.0.0.1", "0.0.0.0") and port == self.port:
                 continue
             asyncio.create_task(self.connect(host, port))
+            
