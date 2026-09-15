@@ -1,260 +1,173 @@
-
-import hashlib
+"""Nó BRN headless — blockchain + P2P + carteira automatica + mineracao."""
+import asyncio
 import json
-import time
-import threading
-import sqlite3
 import os
-import requests
-from pathlib import Path
-from functools import wraps
-from flask import Flask, jsonify, request, Response
-from cripto_wallet import WalletManager
-from bruno_blockchain_real import (Blockchain, Block, Transaction, State,
-                                   Finality, NATIVE_ASSET, NATIVE_ASSET_ISSUER,
-                                   DB_PATH, BLOCK_REWARD, MIN_STAKE,
-                                   FINALITY_INTERVAL, FINALITY_THRESHOLD,
-                                   FAUCET_ADDRESS, FAUCET_AMOUNT,
-                                   FAUCET_COOLDOWN, REGULATOR_ADDRESS,
-                                   GENESIS_ALLOCATIONS, NETWORK_ID)
+import sys
+import time
+from blockchain import Blockchain
+from p2p import PeerManager
+from wallet import Wallet
 
-P2P_PORT = int(os.environ.get("BRN_P2P_PORT", "7777"))
-TARGET_BLOCK_TIME = int(os.environ.get("BRN_TARGET_BLOCK_TIME", "10"))
-WEB_USER = os.environ.get("BRN_WEB_USER", "admin")
-WEB_PASS = os.environ.get("BRN_WEB_PASS", "")
-
-_global_node_ref = None
-_blockchain_instance = None
-
-app = Flask(__name__)
+WALLET_FILE = "wallet.brn"
+UNIT = 10 ** 8
 
 
-def require_auth(f):
-    @wraps(f)
-    def deco(*a, **kw):
-        if not WEB_PASS:
-            return Response("BRN_WEB_PASS nao definido.", 500)
-        auth = request.authorization
-        if not auth or auth.username != WEB_USER or auth.password != WEB_PASS:
-            return Response("Acesso negado.", 401,
-                            {"WWW-Authenticate": 'Basic realm="BRN"'})
-        return f(*a, **kw)
-    return deco
+# ============================================================
+# CARTEIRA
+# ============================================================
+def load_or_create_wallet(path: str = WALLET_FILE) -> Wallet:
+    """Carrega a carteira de 'path' ou cria uma nova se nao existir."""
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            w = Wallet(private_key_hex=data["private_key"])
+            print(f"[WALLET] Carteira carregada de {path}")
+            return w
+        except Exception as e:
+            backup = f"{path}.bak.{int(time.time())}"
+            try:
+                os.rename(path, backup)
+                print(f"[WALLET] Arquivo corrompido movido para {backup}")
+            except Exception:
+                pass
+            print(f"[WALLET] Criando nova carteira...")
 
-
-@app.route("/api/status")
-def api_status():
-    if _blockchain_instance is None:
-        return jsonify(error="nao inicializada"), 503
-    bc = _blockchain_instance
-    return jsonify(network_id=NETWORK_ID, height=len(bc.chain),
-                   last_hash=bc.last_block.hash, mempool=len(bc.pending),
-                   finalized=bc.finality.finalized_height,
-                   assets=list(bc.registry.assets.keys()))
-
-
-@app.route("/api/portfolio/<address>")
-@require_auth
-def api_portfolio(address):
-    if _blockchain_instance is None:
-        return jsonify(error="nao inicializada"), 503
-    return jsonify(portfolio=_blockchain_instance.portfolio(address))
-
-
-@app.route("/api/faucet", methods=["POST"])
-@require_auth
-def api_faucet():
-    if _blockchain_instance is None:
-        return jsonify(ok=False, msg="nao inicializada"), 503
-    d = request.get_json(silent=True) or {}
-    addr = (d.get("address") or "").strip()
-    if not addr.startswith("brn1"):
-        return jsonify(ok=False, msg="endereco invalido"), 400
-    sk = d.get("private_key", ""); pk = d.get("public_key", "")
-    if not sk or not pk:
-        return jsonify(ok=False, msg="chaves obrigatorias"), 400
-    return jsonify(_blockchain_instance.faucet(addr, sk, pk))
-
-
-@app.route("/api/transfer", methods=["POST"])
-@require_auth
-def api_transfer():
-    if _blockchain_instance is None:
-        return jsonify(ok=False, msg="nao inicializada"), 503
-    d = request.get_json(silent=True) or {}
+    w = Wallet()
     try:
-        tx = Transaction.build(
-            tx_type=d.get("type", "transfer"),
-            asset_id=d["asset_id"], sender_address=d["from"],
-            receiver_address=d["to"], amount=float(d["amount"]),
-            nonce=int(d["nonce"]), private_key_hex=d["private_key"],
-            public_key_hex=d["public_key"], metadata=d.get("metadata"))
-    except (KeyError, ValueError) as e:
-        return jsonify(ok=False, msg=f"payload invalido: {e}"), 400
-    return jsonify(_blockchain_instance.add_transaction(tx))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(w.to_dict(), f, indent=2)
+        print(f"[WALLET] Nova carteira criada e salva em {path}")
+        print(f"[WALLET] IMPORTANTE: faca backup do arquivo '{path}'!")
+    except Exception as e:
+        print(f"[WALLET] Erro ao salvar carteira: {e}")
+    return w
 
 
-@app.route("/api/mine", methods=["POST"])
-@require_auth
-def api_mine():
-    if _blockchain_instance is None:
-        return jsonify(ok=False, msg="nao inicializada"), 503
-    blk = _blockchain_instance.produce_block()
-    if blk is None:
-        return jsonify(ok=False, msg="nao foi possivel produzir bloco.")
-    return jsonify(ok=True, block=blk.to_dict())
+def print_banner(wallet: Wallet, bc: Blockchain, port: int):
+    saldo = bc.db.balance(wallet.address) / UNIT
+    print()
+    print("=" * 64)
+    print("  BRN - BrunoCoin  |  no headless")
+    print("=" * 64)
+    print(f"  Porta P2P    : {port}")
+    print(f"  Altura       : {bc.db.height()}")
+    print(f"  Tip          : {bc.db.tip_hash()[:24]}...")
+    print(f"  Endereco     : {wallet.address}")
+    print(f"  Pubkey       : {wallet.pub_hex[:44]}...")
+    print(f"  Saldo        : {saldo:.8f} BRN")
+    print("=" * 64)
+    print()
 
 
-@app.route("/api/chain", methods=["GET"])
-def api_chain():
-    if _blockchain_instance is None:
-        return jsonify(error="nao inicializada"), 503
-    return jsonify(_blockchain_instance.to_dict())
+# ============================================================
+# LOOPS AUXILIARES
+# ============================================================
+async def _status_loop(bc: Blockchain, wallet: Wallet):
+    """Exibe status a cada 15 segundos quando a altura muda."""
+    last_height = bc.db.height()
+    while True:
+        await asyncio.sleep(15)
+        try:
+            h = bc.db.height()
+            if h != last_height:
+                saldo = bc.db.balance(wallet.address) / UNIT
+                print(f"[STATUS] Altura={h}  "
+                      f"Saldo={saldo:.8f} BRN  "
+                      f"tip={bc.db.tip_hash()[:16]}")
+                last_height = h
+        except Exception as e:
+            print(f"[STATUS] erro: {e}")
 
 
-@app.route("/api/slashing")
-@require_auth
-def api_slashing():
-    if _blockchain_instance is None: return jsonify([])
-    return jsonify(_blockchain_instance.slashing_report())
+async def _mine_loop(bc: Blockchain, wallet: Wallet, pm: PeerManager):
+    """Mina blocos continuamente para o endereco da carteira."""
+    while True:
+        try:
+            block = await asyncio.to_thread(bc.mine_block, wallet.address)
+            if block:
+                saldo = bc.db.balance(wallet.address) / UNIT
+                print(f"[MINE] bloco #{block['height']} {block['hash'][:16]}  "
+                      f"txs={len(block['transactions'])}  "
+                      f"diff={block['difficulty']}  "
+                      f"saldo={saldo:.8f} BRN")
+                try:
+                    await pm.broadcast({
+                        "type": "inv_block",
+                        "height": block["height"],
+                        "hash": block["hash"],
+                    })
+                except Exception as e:
+                    print(f"[MINE] falha ao propagar bloco: {e}")
+        except Exception as e:
+            print(f"[MINE] erro: {e}")
+        await asyncio.sleep(2)
 
 
-@app.route("/api/finality")
-@require_auth
-def api_finality():
-    if _blockchain_instance is None: return jsonify({})
-    return jsonify(_blockchain_instance.finality_report())
+# ============================================================
+# LOOP PRINCIPAL
+# ============================================================
+async def run(port: int, db_path: str,
+              miner_address: str | None = None, mine: bool = False):
+    # 1) Carteira: carrega ou cria automaticamente
+    wallet = load_or_create_wallet()
+    if not miner_address:
+        miner_address = wallet.address
+
+    # 2) Blockchain (usa o endereco da carteira no genesis, se o banco for novo)
+    bc = Blockchain(db_path=db_path, genesis_address=miner_address)
+    print_banner(wallet, bc, port)
+
+    # 3) P2P
+    pm = PeerManager(bc, port)
+    await pm.start()
+
+    # 4) Mineração automática
+    if mine and miner_address:
+        asyncio.create_task(_mine_loop(bc, wallet, pm))
+        print(f"[MINE] Mineracao ativa para {miner_address}")
+
+    # 5) Status periodico
+    asyncio.create_task(_status_loop(bc, wallet))
+
+    print(f"[BRN] no iniciado. Aguardando conexoes P2P...")
+    print(f"[BRN] Pressione Ctrl+C para encerrar.")
+    print()
+
+    # 6) Loop infinito de baixo consumo
+    while True:
+        await asyncio.sleep(3600)
 
 
-@app.route("/p2p/tx", methods=["POST"])
-def p2p_tx():
-    if _blockchain_instance is None: return jsonify(ok=False), 503
-    tx = request.get_json(silent=True) or {}
-    r = _blockchain_instance.add_transaction(tx)
-    if r.get("ok") and _global_node_ref:
-        _global_node_ref.broadcast_tx(tx)
-    return jsonify(r)
+# ============================================================
+# ENTRYPOINT
+# ============================================================
+def main():
+    args = sys.argv[1:]
 
+    # ----- Flags -----
+    mine = True  # padrao novo: minerar automaticamente
+    if "--no-mine" in args:
+        mine = False
+        args = [a for a in args if a != "--no-mine"]
+    if "--mine" in args:
+        mine = True
+        args = [a for a in args if a != "--mine"]
 
-@app.route("/p2p/chain", methods=["GET"])
-def p2p_chain():
-    if _blockchain_instance is None: return jsonify(error="nao inicializada"), 503
-    return jsonify(_blockchain_instance.to_dict())
+    # ----- Posicionais: [port] [db_path] [miner_address] -----
+    try:
+        port = int(args[0]) if len(args) > 0 else 6001
+    except ValueError:
+        port = 6001
 
+    db_path = args[1] if len(args) > 1 else f"blockchain_node_{port}.db"
+    miner_address = args[2] if len(args) > 2 else None
 
-@app.route("/p2p/block", methods=["POST"])
-def p2p_block():
-    if _blockchain_instance is None: return jsonify(ok=False), 503
-    d = request.get_json(silent=True) or {}
-    try: blk = Block.from_dict(d)
-    except Exception as e: return jsonify(ok=False, msg=str(e)), 400
-    if not blk.verify():
-        _blockchain_instance._slash(blk.validator,
-                                    f"bloco invalido #{blk.index} via P2P",
-                                    block_idx=blk.index)
-        return jsonify(ok=False, msg="bloco invalido"), 400
-    return jsonify(ok=True)
-
-
-class Node:
-    def __init__(self, db_path=DB_PATH, identity=None, p2p_port=P2P_PORT,
-                 web_port=None, seed_peers=None):
-        global _global_node_ref, _blockchain_instance
-        self.db_path = db_path
-        self.p2p_port = p2p_port
-        self.web_port = int(web_port or os.environ.get("BRN_WEB_PORT", "5000"))
-        self.seed_peers = list(seed_peers or [])
-        self.peers = set(self.seed_peers)
-        self.running = False
-        self.lock = threading.RLock()
-        self.identity = identity or WalletManager.generate_keypair()
-        self.bc = Blockchain(db_path=db_path, node_identity=self.identity,
-                             regulator_address=REGULATOR_ADDRESS)
-        self.bc.node_identity = self.identity
-        _blockchain_instance = self.bc
-        _global_node_ref = self
-
-    def register_external_peer(self, endpoint):
-        if not endpoint or ":" not in endpoint: return
-        with self.lock:
-            if endpoint not in self.peers:
-                self.peers.add(endpoint)
-                print(f"[p2p] peer registrado: {endpoint}")
-
-    def broadcast_tx(self, tx):
-        for p in list(self.peers):
-            try: requests.post(f"http://{p}/p2p/tx", json=tx, timeout=3)
-            except Exception: pass
-
-    def broadcast_block(self, blk):
-        for p in list(self.peers):
-            try: requests.post(f"http://{p}/p2p/block", json=blk, timeout=3)
-            except Exception: pass
-
-    def sync_with_peers(self):
-        for p in list(self.peers):
-            try:
-                r = requests.get(f"http://{p}/p2p/chain", timeout=5)
-                if r.status_code == 200:
-                    self.bc.replace_chain(r.json()["chain"])
-            except Exception: pass
-
-    def _consensus_loop(self):
-        while self.running:
-            try:
-                blk = self.bc.produce_block()
-                if blk:
-                    print(f"[consenso] bloco #{blk.index} ({len(blk.transactions)} tx)")
-                    self.broadcast_block(blk.to_dict())
-            except Exception as e:
-                print(f"[consenso] erro: {e}")
-            time.sleep(TARGET_BLOCK_TIME)
-
-    def _p2p_loop(self):
-        while self.running:
-            try: self.sync_with_peers()
-            except Exception: pass
-            time.sleep(30)
-
-    def start(self):
-        self.running = True
-        threading.Thread(target=self._consensus_loop, daemon=True,
-                         name="consensus").start()
-        threading.Thread(target=self._p2p_loop, daemon=True,
-                         name="p2p-sync").start()
-        print(f"[node] P2P em 0.0.0.0:{self.p2p_port} | web :{self.web_port}")
-        print(f"[node] endereco: {self.identity['address']}")
-        app.run(host="0.0.0.0", port=self.web_port, debug=False,
-                use_reloader=False, threaded=True)
+    try:
+        asyncio.run(run(port, db_path, miner_address, mine))
+    except KeyboardInterrupt:
+        print("\n[BRN] encerrado pelo usuario")
 
 
 if __name__ == "__main__":
-    import sys
-    port_arg = None; db_arg = None
-    for arg in sys.argv[1:]:
-        if arg.isdigit() and 1 <= int(arg) <= 65535:
-            port_arg = int(arg)
-        else:
-            db_arg = arg
-    db = db_arg or DB_PATH
-    port = port_arg or int(os.environ.get("BRN_WEB_PORT", "5000"))
-    os.environ["BRN_WEB_PORT"] = str(port)
-    print(f"[node] iniciando | DB={db} | web_port={port}")
-
-    identity_file = Path(f"{db}.identity.json")
-    identity = None
-    if identity_file.exists():
-        try:
-            identity = json.loads(identity_file.read_text())
-            print(f"[node] identidade: {identity['address']}")
-        except Exception: identity = None
-    if identity is None:
-        identity = WalletManager.generate_keypair()
-        try:
-            identity_file.write_text(json.dumps(identity, indent=2))
-            os.chmod(identity_file, 0o600)
-        except OSError: pass
-        print(f"[node] identidade criada: {identity['address']}")
-
-    Node(db_path=db, identity=identity, p2p_port=P2P_PORT,
-         web_port=port).start()
+    main()

@@ -1,23 +1,97 @@
-### AL ###
-#Template for AL projects for Dynamics 365 Business Central
-#launch.json folder
+# ============================================================
+# Segredos e credenciais
+# ============================================================
+.env
+.env.*
+!.env.example
+*.env
+node*_identity.json
+node*_faucet.json
+*_identity.json
+*_faucet.json
+faucet_identity.json
+secrets.json
+
+# ============================================================
+# Bancos de dados (blockchain + faucet + slashing + mempool)
+# ============================================================
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+blockchain*.db
+node*.db
+
+# ============================================================
+# Carteiras e chaves
+# ============================================================
+wallets/
+*.wallet
+*.key
+*.pem
+*.p12
+
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ============================================================
+# Logs
+# ============================================================
+*.log
+logs/
+
+# ============================================================
+# IDE / Editores
+# ============================================================
 .vscode/
-#Cache folder
-.alcache/
-#Symbols folder
-.alpackages/
-#Snapshots folder
-.snapshots/
-#Testing Output folder
-.output/
-#Extension App-file
-*.app
-#Rapid Application Development File
-rad.json
-#Translation Base-file
-*.g.xlf
-#License-files
-*.bclicense
-*.flf
-#Test results file
-TestResults.xml
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# ============================================================
+# Sistema operacional
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============================================================
+# ngrok
+# ============================================================
+.ngrok/
+ngrok.yml
+ngrok.log
+
+# ============================================================
+# Temporários
+# ============================================================
+*.tmp
+*.bak
+*.orig
+tmp/
+temp/

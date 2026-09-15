@@ -1,124 +1,802 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
-<meta charset="utf-8">
-<title>BRN RWA — Carteira Digital</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8" />
+<title>BRN — BrunoCoin</title>
 <style>
-  :root { color-scheme: dark; }
-  body { font-family: -apple-system,"Segoe UI",Roboto,sans-serif;
-         background:#0d1117; color:#e6edf3; margin:0; padding:20px; }
-  h1 { font-size:20px; margin:0 0 16px; }
-  h2 { font-size:14px; margin:20px 0 8px; color:#8b949e;
-       text-transform:uppercase; letter-spacing:.5px; }
-  .box { background:#161b22; border:1px solid #30363d; border-radius:8px;
-         padding:16px; margin-bottom:16px; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .form-group { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; }
-  .form-group.full { grid-column: span 2; }
-  label { font-size:12px; color:#8b949e; font-weight:500; }
-  input, select { padding:8px 12px; background:#0d1117; color:#e6edf3;
-                  border:1px solid #30363d; border-radius:6px;
-                  font-family:monospace; font-size:13px; }
-  .actions { display:flex; gap:8px; margin-top:8px; flex-wrap: wrap; }
-  button { padding:10px 16px; border:0; border-radius:6px; cursor:pointer;
-           font-weight:600; font-size:13px; }
-  .btn-primary { background:#238636; color:#fff; }
-  .btn-primary:hover { background:#2ea043; }
-  .btn-secondary { background:#21262d; color:#c9d1d9; border:1px solid #30363d; }
-  .btn-secondary:hover { background:#30363d; }
-  .btn-blue { background:#2188ff; color:#fff; }
-  .btn-orange { background:#d29922; color:#fff; }
-  .counter-badge { display:inline-block; background:#1f6feb33; color:#58a6ff;
-                   padding:2px 8px; border-radius:10px; font-size:12px;
-                   font-weight:600; margin-left:6px; }
-  pre { background:#0d1117; padding:12px; border-radius:6px;
-        font-family:monospace; font-size:12px; border:1px solid #21262d;
-        margin:4px 0 0; overflow-x:auto; white-space: pre-wrap;
-        word-break: break-all; max-height: 320px; overflow-y: auto; }
-  #console-log { color:#58a6ff; }
+  :root {
+    --bg:#0e1117; --fg:#e6edf3; --muted:#8b949e; --accent:#58a6ff;
+    --line:#21262d; --line2:#30363d; --panel:#161b22; --panel2:#1c2129;
+    --ok:#3fb950; --err:#f85149; --warn:#d29922; --gold:#e3b341;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    background:var(--bg); color:var(--fg); font-size:13px;
+  }
+  header {
+    padding:14px 24px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+  }
+  header h1 { font-size:15px; margin:0; letter-spacing:.5px; }
+  header h1 b { color:var(--gold); }
+  .stat { color:var(--muted); font-size:12px; }
+  .stat b { color:var(--fg); }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
+         background:var(--err); margin-right:6px; vertical-align:middle; }
+  .dot.on { background:var(--ok); box-shadow:0 0 6px var(--ok); }
+
+  nav.tabs {
+    display:flex; gap:2px; padding:8px 16px 0; border-bottom:1px solid var(--line);
+    background:var(--bg); flex-wrap:wrap;
+  }
+  nav.tabs button {
+    background:transparent; color:var(--muted); border:1px solid transparent;
+    border-bottom:none; padding:8px 14px; border-radius:6px 6px 0 0;
+    cursor:pointer; font-family:inherit; font-size:12px; font-weight:600;
+  }
+  nav.tabs button:hover { color:var(--fg); }
+  nav.tabs button.active { color:var(--accent); background:var(--panel); border-color:var(--line); }
+
+  main { padding:20px; display:grid; gap:18px; }
+  .panel { display:none; }
+  .panel.active { display:grid; gap:18px; }
+
+  section { border:1px solid var(--line); border-radius:8px; overflow:hidden; background:var(--panel); }
+  section h2 {
+    margin:0; font-size:12px; padding:10px 16px; background:var(--panel2);
+    border-bottom:1px solid var(--line); color:var(--muted); text-transform:uppercase; letter-spacing:.6px;
+  }
+  .body { padding:16px; }
+
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { padding:8px 16px; text-align:left; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  tr:last-child td { border-bottom:none; }
+  tr:hover td { background:var(--panel2); }
+
+  .mono { font-family: ui-monospace, monospace; }
+  .accent { color:var(--accent); }
+  .ok { color:var(--ok); }
+  .err { color:var(--err); }
+  .warn { color:var(--warn); }
+  .muted { color:var(--muted); }
+  .gold { color:var(--gold); }
+
+  input, textarea, select {
+    background:var(--panel2); border:1px solid var(--line2); color:var(--fg);
+    padding:8px 12px; border-radius:6px; font-family:inherit; font-size:12px; width:100%; outline:none;
+  }
+  input:focus, textarea:focus { border-color:var(--accent); }
+  textarea { resize:vertical; min-height:56px; }
+
+  button {
+    background:var(--panel2); border:1px solid var(--line2); color:var(--fg);
+    padding:8px 14px; border-radius:6px; cursor:pointer; font-family:inherit;
+    font-size:12px; font-weight:600;
+  }
+  button:hover { background:#252b36; }
+  button.primary { background:var(--accent); color:#001a33; border-color:var(--accent); }
+  button.primary:hover { filter:brightness(1.08); }
+  button.danger { background:#2a1014; color:#ff8a85; border-color:#5a1c22; }
+  button.danger:hover { background:#3a1519; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  .row > * { flex:1; min-width:160px; }
+  label { display:block; color:var(--muted); font-size:11px; margin:8px 0 4px; text-transform:uppercase; letter-spacing:.4px; }
+
+  .kv { display:flex; justify-content:space-between; padding:6px 0;
+        border-bottom:1px dashed var(--line); font-size:12px; }
+  .kv:last-child { border-bottom:none; }
+  .kv span:first-child { color:var(--muted); }
+  .kv span:last-child { word-break:break-all; text-align:right; max-width:70%; }
+
+  .balance { font-size:24px; font-weight:800; color:var(--gold); margin:4px 0 10px; }
+  .balance small { color:var(--muted); font-size:12px; font-weight:600; margin-left:6px; }
+
+  .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:700; }
+  .pill.in  { background:rgba(63,185,80,.15);  color:var(--ok); }
+  .pill.out { background:rgba(248,81,73,.15);  color:var(--err); }
+  .pill.pend{ background:rgba(210,153,34,.15); color:var(--warn); }
+
+  .toast {
+    position:fixed; bottom:22px; left:50%; transform:translateX(-50%);
+    background:#11161f; border:1px solid var(--line2); color:var(--fg);
+    padding:10px 16px; border-radius:8px; font-size:12px;
+    box-shadow:0 8px 28px rgba(0,0,0,.55); z-index:100;
+    opacity:0; transition:opacity .22s; pointer-events:none; max-width:90vw;
+  }
+  .toast.show { opacity:1; }
+  .toast.ok  { border-color:var(--ok); }
+  .toast.err { border-color:var(--err); }
+
+  .copy { cursor:pointer; color:var(--accent); font-size:11px; margin-left:8px; }
+  .copy:hover { text-decoration:underline; }
+
+  /* Lista de erros/avisos da verificação */
+  ul.err-list, ul.warn-list {
+    margin:8px 0 0 18px; padding:0;
+  }
+  ul.err-list li { color:var(--err); margin:3px 0; }
+  ul.warn-list li { color:var(--warn); margin:3px 0; }
+
+  .verify-badge {
+    display:inline-block; padding:4px 12px; border-radius:20px;
+    font-weight:700; font-size:12px; letter-spacing:.3px;
+  }
+  .verify-badge.ok  { background:rgba(63,185,80,.15);  color:var(--ok); }
+  .verify-badge.err { background:rgba(248,81,73,.15);  color:var(--err); }
 </style>
 </head>
 <body>
 
-  <h1>🏦 BRN RWA — Carteira de Ativos do Mundo Real</h1>
+<header>
+  <h1>🪙 <b>BRN</b> — BrunoCoin</h1>
+  <span class="stat"><span class="dot" id="netDot"></span><span id="netStatus">iniciando…</span></span>
+  <span class="stat">altura: <b id="h">—</b></span>
+  <span class="stat">tip: <b id="tip">—</b></span>
+  <span class="stat">mempool: <b id="mp">—</b></span>
+  <span class="stat">diff: <b id="diff">—</b></span>
+  <span class="stat">pares: <b id="peers">0</b></span>
+  <span class="stat">minerando: <b id="mining">não</b></span>
+  <span class="stat">cadeia: <b id="chainStatus">—</b></span>
+</header>
 
-  <h2>🔑 Chaves Ativas (ECDSA SECP256k1)</h2>
-  <div class="box">
-    <div class="grid">
-      <div class="form-group full">
-        <label>Seu Endereço Público</label>
-        <input id="w-addr" readonly placeholder="brn1...">
+<nav class="tabs">
+  <button data-tab="explorer" class="active">Explorador</button>
+  <button data-tab="wallet">Carteira</button>
+  <button data-tab="send">Enviar</button>
+  <button data-tab="history">Histórico</button>
+  <button data-tab="mempool">Mempool</button>
+  <button data-tab="mining">Mineração</button>
+  <button data-tab="verify">Verificação</button>
+  <button data-tab="network">Rede</button>
+</nav>
+
+<main>
+
+  <!-- ===================== EXPLORADOR ===================== -->
+  <div class="panel active" id="panel-explorer">
+    <section>
+      <h2>Consulta de saldo</h2>
+      <div class="body">
+        <div class="row">
+          <input id="exAddr" placeholder="brn1..." />
+          <button onclick="exLookup()" style="flex:0 0 auto;min-width:120px;">Consultar</button>
+        </div>
+        <div id="exBal" style="margin-top:12px;"></div>
       </div>
-      <div class="form-group">
-        <label>Chave Privada (SK)</label>
-        <input id="w-sk" type="password" placeholder="não carregada">
+    </section>
+
+    <section>
+      <h2>Últimos blocos</h2>
+      <table>
+        <thead><tr><th>Altura</th><th>Hash</th><th>Timestamp</th><th>Txs</th><th>Diff</th></tr></thead>
+        <tbody id="blocks"></tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Mempool</h2>
+      <table>
+        <thead><tr><th>TXID</th><th>De</th><th>Para</th><th>Valor</th></tr></thead>
+        <tbody id="ex-mp-body"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <!-- ===================== CARTEIRA ===================== -->
+  <div class="panel" id="panel-wallet">
+    <section>
+      <h2>Minha carteira</h2>
+      <div class="body">
+        <div class="kv"><span>Endereço</span><span class="mono" id="wAddr">—</span></div>
+        <div class="kv"><span>Chave pública</span><span class="mono" id="wPub">—</span></div>
+        <div class="kv"><span>Chave privada</span><span class="mono" id="wPriv">—</span></div>
+        <div class="row" style="margin-top:12px;">
+          <button class="primary" id="btnGen">🎲 Gerar nova carteira</button>
+          <button id="btnCopyPriv">📋 Copiar chave privada</button>
+          <button id="btnCopyAddr">📋 Copiar endereço</button>
+        </div>
+        <div class="muted" style="margin-top:10px;font-size:11px;">
+          ⚠️ Guarde a chave privada. Sem ela é impossível recuperar os fundos.
+        </div>
       </div>
-      <div class="form-group">
-        <label>Chave Pública (PK)</label>
-        <input id="w-pk" type="password" placeholder="não carregada">
+    </section>
+
+    <section>
+      <h2>Saldo</h2>
+      <div class="body">
+        <div class="balance" id="balance">0.00000000 <small>BRN</small></div>
+        <div class="kv"><span>Pendente de saída</span><span id="bPendOut">0</span></div>
+        <div class="kv"><span>Pendente de entrada</span><span id="bPendIn">0</span></div>
+        <div class="kv"><span>Disponível</span><span id="bAvail">0</span></div>
+        <button style="margin-top:12px;" id="btnRefreshBal">🔄 Atualizar saldo</button>
       </div>
-    </div>
-    <div class="actions">
-      <button class="btn-primary"   onclick="uiGenerateWallet()">Criar Nova Carteira</button>
-      <button class="btn-secondary" onclick="toggleKeys()">👁️ Mostrar/Ocultar Chaves</button>
-    </div>
+    </section>
+
+    <section>
+      <h2>Backup criptografado</h2>
+      <div class="body">
+        <label>Arquivo</label>
+        <input id="bakFile" value="minha_carteira.brn" />
+        <label>Senha</label>
+        <input id="bakPass" type="password" placeholder="••••••••" />
+        <div class="row" style="margin-top:12px;">
+          <button class="primary" id="btnSaveW">💾 Salvar</button>
+          <button id="btnLoadW">📂 Carregar</button>
+        </div>
+      </div>
+    </section>
   </div>
 
-  <h2>📊 Portfólio RWA
-    <span id="asset-count" class="counter-badge">Ativos: 0</span>
-  </h2>
-  <div class="box">
-    <div class="actions" style="margin-bottom: 12px; margin-top: 0;">
-      <button class="btn-blue"      onclick="uiSyncPortfolio()">🔄 Sincronizar</button>
-      <button class="btn-orange"    onclick="uiMineBlock()">⛏️ Forjar Bloco</button>
-      <button class="btn-secondary" onclick="uiCallFaucet()">🚰 Faucet</button>
-    </div>
-    <label>Tokens e Compliance</label>
-    <pre id="portfolio-display">Crie ou carregue uma carteira para sincronizar.</pre>
+  <!-- ===================== ENVIAR ===================== -->
+  <div class="panel" id="panel-send">
+    <section>
+      <h2>Enviar BRN</h2>
+      <div class="body">
+        <label>Destinatário</label>
+        <input id="txTo" placeholder="brn1..................." />
+        <label>Quantidade</label>
+        <input id="txAmt" type="number" step="0.00000001" placeholder="0.00000000" />
+        <button class="primary" id="btnSend" style="margin-top:14px;">✉️ Assinar e enviar</button>
+        <div class="muted" style="margin-top:10px;font-size:11px;">
+          A transação é assinada localmente com sua chave privada e enviada à mempool.
+          Ela será confirmada quando um bloco for minerado.
+        </div>
+      </div>
+    </section>
   </div>
 
-  <h2>💾 Backup Criptografado (.wallet)</h2>
-  <div class="box grid">
-    <div class="form-group">
-      <label>Nome do Arquivo</label>
-      <input id="f-name" value="carteira_rwa">
-    </div>
-    <div class="form-group">
-      <label>Senha Master (Argon2id)</label>
-      <input id="f-pass" type="password" placeholder="Mínimo 12 caracteres">
-    </div>
-    <div class="actions" style="grid-column: span 2; margin-top: 0;">
-      <button class="btn-secondary" onclick="uiSaveWallet()">Exportar</button>
-      <button class="btn-secondary" onclick="uiLoadWallet()">Importar</button>
-    </div>
+  <!-- ===================== HISTÓRICO ===================== -->
+  <div class="panel" id="panel-history">
+    <section>
+      <h2>Histórico da carteira</h2>
+      <div class="body">
+        <button id="btnHist">🔄 Atualizar</button>
+        <div id="histList" style="margin-top:12px;"></div>
+      </div>
+    </section>
   </div>
 
-  <h2>💸 Transferência</h2>
-  <div class="box grid">
-    <div class="form-group">
-      <label>Ativo</label>
-      <input id="t-asset" value="BRN">
-    </div>
-    <div class="form-group">
-      <label>Quantidade</label>
-      <input id="t-amount" type="number" step="any" placeholder="0.0">
-    </div>
-    <div class="form-group full">
-      <label>Destinatário</label>
-      <input id="t-to" placeholder="brn1...">
-    </div>
-    <div class="actions" style="grid-column: span 2; margin-top: 0;">
-      <button class="btn-primary" style="width:100%;"
-              onclick="uiExecuteTransfer()">Assinar e Transmitir</button>
-    </div>
+  <!-- ===================== MEMPOOL ===================== -->
+  <div class="panel" id="panel-mempool">
+    <section>
+      <h2>Transações pendentes</h2>
+      <div class="body">
+        <button id="btnMem">🔄 Atualizar</button>
+        <div id="memList" style="margin-top:12px;"></div>
+      </div>
+    </section>
   </div>
 
-  <h2>Console</h2>
-  <div class="box" style="padding: 10px;">
-    <pre id="console-log">Aguardando pywebview...</pre>
+  <!-- ===================== MINERAÇÃO ===================== -->
+  <div class="panel" id="panel-mining">
+    <section>
+      <h2>Mineração contínua</h2>
+      <div class="body">
+        <label>Endereço do minerador (recebe a recompensa)</label>
+        <input id="minerAddr" placeholder="brn1..." />
+        <button id="btnUseMine" style="margin-top:10px;">Usar meu endereço</button>
+        <div class="row" style="margin-top:12px;">
+          <button class="primary" id="btnStartMine">⛏️ Iniciar mineração</button>
+          <button class="danger" id="btnStopMine">🛑 Parar mineração</button>
+        </div>
+        <div class="muted" style="margin-top:10px;font-size:11px;">
+          Recompensa por bloco: <b class="gold">1.00000000 BRN</b> + taxas da mempool.
+        </div>
+      </div>
+    </section>
   </div>
 
-  <script src="wallet_core.js"></script>
+  <!-- ===================== VERIFICAÇÃO ===================== -->
+  <div class="panel" id="panel-verify">
+    <section>
+      <h2>Integridade da cadeia</h2>
+      <div class="body">
+        <div class="row" style="margin-bottom:14px;">
+          <button class="primary" id="btnVerify">🔎 Verificar agora</button>
+          <button id="btnVerifyFull">🔗 Verificação completa</button>
+        </div>
+
+        <div id="verifySummary" style="margin-bottom:10px;">
+          <span class="verify-badge" id="verifyBadge">—</span>
+        </div>
+
+        <div class="kv"><span>Altura verificada</span><span id="verifyHeight">—</span></div>
+        <div class="kv"><span>Blocos verificados</span><span id="verifyBlocks">—</span></div>
+        <div class="kv"><span>Transações verificadas</span><span id="verifyTxs">—</span></div>
+        <div class="kv"><span>Hash do topo (tip)</span><span class="mono" id="verifyTip">—</span></div>
+
+        <div style="margin-top:16px;">
+          <div class="muted" style="margin-bottom:6px;font-size:11px;text-transform:uppercase;letter-spacing:.4px;">
+            Verificações executadas
+          </div>
+          <ul class="muted" style="margin:0 0 14px 18px;padding:0;font-size:11px;">
+            <li>Bloco gênese válido (altura 0, prev_hash zerado)</li>
+            <li>Alturas sequenciais (0, 1, 2, …)</li>
+            <li>Encadeamento (prev_hash == hash do bloco anterior)</li>
+            <li>Hash do bloco recalculado (não adulterado)</li>
+            <li>Prova de trabalho (hash ≤ alvo)</li>
+            <li>Merkle root confere com as txids</li>
+            <li>Coinbase única na posição 0</li>
+            <li>Coinbase ≤ recompensa + taxas</li>
+            <li>Ausência de gasto duplo (UTXO gasto duas vezes)</li>
+            <li>Ausência de txid duplicada</li>
+            <li>Saldos nunca negativos</li>
+          </ul>
+        </div>
+
+        <div id="verifyOut"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===================== REDE ===================== -->
+  <div class="panel" id="panel-network">
+    <section>
+      <h2>Meus endereços locais</h2>
+      <div class="body">
+        <div id="localIps" class="kv"><span>—</span><span>—</span></div>
+        <button style="margin-top:10px;" id="btnLocal">🔄 Mostrar IPs</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Conectar a um par</h2>
+      <div class="body">
+        <div class="row">
+          <div>
+            <label>IP</label>
+            <input id="peerIp" placeholder="192.168.0.17" />
+          </div>
+          <div>
+            <label>Porta</label>
+            <input id="peerPort" type="number" value="6001" />
+          </div>
+        </div>
+        <button class="primary" id="btnConnect" style="margin-top:12px;">🔗 Conectar e sincronizar</button>
+        <div class="muted" style="margin-top:10px;font-size:11px;">
+          Dois nós na mesma máquina? Use <b>127.0.0.1</b> e a outra porta (ex.: 6002).
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Pares conectados</h2>
+      <div class="body">
+        <button id="btnPeers">🔄 Atualizar</button>
+        <div id="peerList" style="margin-top:12px;"></div>
+      </div>
+    </section>
+  </div>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* =========================================================
+   Estado local
+   ========================================================= */
+const $  = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+
+const state = {
+  address: "",
+  public_key: "",
+  private_key: "",
+  mining: false,
+};
+
+/* ---------- Funções utilitárias ---------- */
+function toast(msg, kind=""){
+  const t = $("#toast");
+  t.textContent = msg;
+  t.className = "toast show " + kind;
+  clearTimeout(t._to);
+  t._to = setTimeout(()=>{ t.className = "toast " + kind; }, 3200);
+}
+function copyTxt(txt){
+  if(!txt) return toast("Nada para copiar","err");
+  try{
+    navigator.clipboard.writeText(txt).then(()=>toast("Copiado!","ok"));
+  }catch(e){
+    const ta=document.createElement("textarea");
+    ta.value=txt; document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); ta.remove();
+    toast("Copiado!","ok");
+  }
+}
+function shortHash(h, n=18){ return h ? (h.length>n ? h.slice(0,n)+"…" : h) : "—"; }
+function fmt(v, d=8){ return Number(v||0).toFixed(d); }
+function esc(s){
+  return String(s==null?"":s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+/* ---------- Navegação entre abas ---------- */
+$$("nav.tabs button").forEach(btn=>{
+  btn.addEventListener("click", ()=>{
+    $$("nav.tabs button").forEach(b=>b.classList.remove("active"));
+    $$(".panel").forEach(p=>p.classList.remove("active"));
+    btn.classList.add("active");
+    $("#panel-"+btn.dataset.tab).classList.add("active");
+
+    if(btn.dataset.tab==="explorer") refreshExplorer();
+    if(btn.dataset.tab==="mempool")  refreshMempoolTab();
+    if(btn.dataset.tab==="history")  refreshHistoryTab();
+    if(btn.dataset.tab==="network")  refreshPeers();
+    if(btn.dataset.tab==="verify")   refreshVerify();
+  });
+});
+
+/* ---------- Inicialização ---------- */
+window.addEventListener("pywebviewready", boot);
+if(window.pywebview && window.pywebview.api) boot();   // fallback
+function boot(){
+  $("#netStatus").textContent = "online";
+  $("#netDot").classList.add("on");
+  autoGen().then(refreshHeader);
+  setInterval(refreshHeader, 5000);
+  // Verifica a cadeia uma vez ao iniciar
+  setTimeout(refreshVerify, 800);
+}
+
+/* =========================================================
+   CARTEIRA
+   ========================================================= */
+async function autoGen(){
+  try{
+    const w = await window.pywebview.api.gerar_carteira();
+    applyWallet(w);
+  }catch(e){ toast("Erro ao gerar carteira: "+e, "err"); }
+}
+function applyWallet(w){
+  if(!w) return;
+  state.address     = w.address || w.addr || "";
+  state.public_key  = w.public_key || w.pubkey || w.pub || "";
+  state.private_key = w.spend_secret_key || w.private_key || w.priv || w.secret || "";
+  $("#wAddr").innerHTML = (esc(state.address) || "—") +
+    (state.address ? '<span class="copy" onclick="copyTxt(state.address)">copiar</span>' : '');
+  $("#wPub").textContent  = state.public_key ? shortHash(state.public_key, 40) : "—";
+  $("#wPriv").textContent = state.private_key ? "•••••••• (oculta)" : "—";
+  if(state.address){
+    $("#minerAddr").value = state.address;
+    refreshBalance();
+  }
+}
+$("#btnGen").addEventListener("click", autoGen);
+$("#btnCopyPriv").addEventListener("click", ()=>copyTxt(state.private_key));
+$("#btnCopyAddr").addEventListener("click", ()=>copyTxt(state.address));
+
+async function refreshBalance(){
+  if(!state.address) return;
+  try{
+    const r = await window.pywebview.api.obter_saldo(state.address);
+    if(r && r.status === "erro"){ return; }
+    $("#balance").innerHTML = `${fmt(r.balance)} <small>BRN</small>`;
+    $("#bPendOut").textContent = fmt(r.pending_out);
+    $("#bPendIn").textContent  = fmt(r.pending_in);
+    $("#bAvail").textContent   = fmt(r.available);
+  }catch(e){}
+}
+$("#btnRefreshBal").addEventListener("click", refreshBalance);
+
+/* Backup criptografado */
+$("#btnSaveW").addEventListener("click", async ()=>{
+  if(!state.address) return toast("Gere uma carteira primeiro","err");
+  const f = $("#bakFile").value.trim();
+  const p = $("#bakPass").value;
+  if(!f || !p) return toast("Informe arquivo e senha","err");
+  try{
+    const r = await window.pywebview.api.salvar_carteira_criptografada(
+      f, p, state.address, state.private_key, state.public_key
+    );
+    if(r && r.status === "erro") return toast(r.message, "err");
+    toast("Carteira salva em " + f, "ok");
+  }catch(e){ toast("Erro: "+e, "err"); }
+});
+$("#btnLoadW").addEventListener("click", async ()=>{
+  const f = $("#bakFile").value.trim();
+  const p = $("#bakPass").value;
+  if(!f || !p) return toast("Informe arquivo e senha","err");
+  try{
+    const r = await window.pywebview.api.carregar_carteira_criptografada(f, p);
+    if(r && r.status === "erro") return toast(r.message, "err");
+    applyWallet(r);
+    toast("Carteira carregada.", "ok");
+  }catch(e){ toast("Erro: "+e, "err"); }
+});
+
+/* =========================================================
+   ENVIAR
+   ========================================================= */
+$("#btnSend").addEventListener("click", async ()=>{
+  if(!state.address) return toast("Gere uma carteira primeiro","err");
+  const to  = $("#txTo").value.trim();
+  const amt = parseFloat($("#txAmt").value);
+  if(!to || !amt || amt <= 0) return toast("Preencha destinatário e valor","err");
+  try{
+    const r = await window.pywebview.api.enviar_fundos(
+      state.address, to, amt, state.private_key, state.public_key
+    );
+    if(r.status === "erro") return toast(r.message, "err");
+    toast(r.message || "Transação enviada!", "ok");
+    $("#txTo").value = ""; $("#txAmt").value = "";
+    refreshBalance();
+    refreshMempoolTab();
+  }catch(e){ toast("Erro: "+e, "err"); }
+});
+
+/* =========================================================
+   HISTÓRICO
+   ========================================================= */
+async function refreshHistoryTab(){
+  if(!state.address){
+    $("#histList").innerHTML = "<div class='muted'>Gere uma carteira primeiro.</div>";
+    return;
+  }
+  try{
+    const r = await window.pywebview.api.obter_historico(state.address);
+    if(r.status === "erro"){
+      $("#histList").innerHTML = "<div class='muted'>"+esc(r.message)+"</div>";
+      return;
+    }
+    if(!r.history.length){
+      $("#histList").innerHTML = "<div class='muted'>Sem transações ainda.</div>";
+      return;
+    }
+    let html = "<table><thead><tr><th>Data</th><th>Tipo</th><th>Valor</th><th>Contraparte</th><th>Bloco</th><th>Status</th></tr></thead><tbody>";
+    r.history.forEach(e=>{
+      const cls = e.direction === "entrada" ? "in" : "out";
+      const dt  = new Date((e.timestamp||0)*1000).toLocaleString("pt-BR");
+      html += `<tr>
+        <td>${dt}</td>
+        <td>${esc(e.type)}</td>
+        <td><span class="pill ${cls}">${e.direction==="entrada"?"+":"-"}${fmt(e.amount)}</span></td>
+        <td class="mono">${esc(shortHash(e.counterparty, 20))}</td>
+        <td>${e.block_index ?? "—"}</td>
+        <td>${esc(e.status)}</td>
+      </tr>`;
+    });
+    html += "</tbody></table>";
+    $("#histList").innerHTML = html;
+  }catch(e){ $("#histList").innerHTML = "<div class='muted'>Erro: "+esc(e)+"</div>"; }
+}
+$("#btnHist").addEventListener("click", refreshHistoryTab);
+
+/* =========================================================
+   MEMPOOL (aba dedicada)
+   ========================================================= */
+async function refreshMempoolTab(){
+  try{
+    const r = await window.pywebview.api.obter_mempool();
+    if(!r.transactions || !r.transactions.length){
+      $("#memList").innerHTML = "<div class='muted'>Nenhuma transação pendente.</div>";
+      return;
+    }
+    let html = `<div class="muted" style="margin-bottom:8px;">${r.count} transação(ões) pendente(s).</div>
+      <table><thead><tr><th>De</th><th>Para</th><th>Valor</th><th>TXID</th></tr></thead><tbody>`;
+    r.transactions.forEach(t=>{
+      html += `<tr>
+        <td class="mono">${esc(shortHash(t.sender, 16))}</td>
+        <td class="mono">${esc(shortHash(t.receiver, 16))}</td>
+        <td>${fmt(t.amount)}</td>
+        <td class="mono">${esc(shortHash(t.txid, 16))}</td>
+      </tr>`;
+    });
+    html += "</tbody></table>";
+    $("#memList").innerHTML = html;
+  }catch(e){ $("#memList").innerHTML = "<div class='muted'>Erro: "+esc(e)+"</div>"; }
+}
+$("#btnMem").addEventListener("click", refreshMempoolTab);
+
+/* =========================================================
+   EXPLORADOR
+   ========================================================= */
+async function refreshExplorer(){
+  try{
+    const r = await window.pywebview.api.obter_cadeia_completa();
+    const blocos = (r.chain || []).slice(-15).reverse();
+    $("#blocks").innerHTML = blocos.map(b => {
+      const dt = new Date((b.timestamp||0)*1000).toLocaleString("pt-BR");
+      return `<tr>
+        <td>${b.index}</td>
+        <td class="mono accent">${esc(shortHash(b.hash, 24))}</td>
+        <td>${dt}</td>
+        <td>${(b.transactions||[]).length}</td>
+        <td>${b.difficulty}</td>
+      </tr>`;
+    }).join("") || '<tr><td colspan="5" class="muted">vazio</td></tr>';
+
+    const mp = r.mempool || [];
+    $("#ex-mp-body").innerHTML = mp.length
+      ? mp.slice(0,20).map(t => `<tr>
+          <td class="mono">${esc(shortHash(t.txid, 20))}</td>
+          <td class="mono">${esc(shortHash(t.sender, 16))}</td>
+          <td class="mono">${esc(shortHash(t.receiver, 16))}</td>
+          <td>${fmt(t.amount)}</td>
+        </tr>`).join("")
+      : '<tr><td colspan="4" class="muted">vazia</td></tr>';
+  }catch(e){ /* silencioso */ }
+}
+
+async function exLookup(){
+  const a = $("#exAddr").value.trim();
+  if(!a) return;
+  try{
+    const r = await window.pywebview.api.obter_saldo(a);
+    if(r.status === "erro"){
+      $("#exBal").innerHTML = `<div class="err">${esc(r.message)}</div>`;
+      return;
+    }
+    $("#exBal").innerHTML =
+      `<div class="mono accent">${esc(a)}</div>
+       <div style="margin-top:8px;">saldo: <b class="gold">${fmt(r.balance)} BRN</b></div>
+       <div class="kv"><span>Disponível</span><span>${fmt(r.available)}</span></div>
+       <div class="kv"><span>Pendente de saída</span><span>${fmt(r.pending_out)}</span></div>
+       <div class="kv"><span>Pendente de entrada</span><span>${fmt(r.pending_in)}</span></div>`;
+  }catch(e){ $("#exBal").innerHTML = `<div class="err">Erro: ${esc(e)}</div>`; }
+}
+
+/* =========================================================
+   MINERAÇÃO
+   ========================================================= */
+$("#btnUseMine").addEventListener("click", ()=>{
+  if(state.address) $("#minerAddr").value = state.address;
+  else toast("Gere uma carteira primeiro","err");
+});
+$("#btnStartMine").addEventListener("click", async ()=>{
+  const addr = $("#minerAddr").value.trim() || state.address;
+  if(!addr) return toast("Informe um endereço minerador","err");
+  try{
+    const r = await window.pywebview.api.alternar_mineracao(addr);
+    if(r.status === "erro") return toast(r.message, "err");
+    toast(r.message, "ok");
+    refreshHeader();
+  }catch(e){ toast("Erro: "+e, "err"); }
+});
+$("#btnStopMine").addEventListener("click", async ()=>{
+  try{
+    const r = await window.pywebview.api.alternar_mineracao("");
+    toast(r.message, "ok");
+    refreshHeader();
+  }catch(e){ toast("Erro: "+e, "err"); }
+});
+
+/* =========================================================
+   VERIFICAÇÃO DE CADEIA
+   ========================================================= */
+async function refreshVerify(){
+  const badge = $("#verifyBadge");
+  const out   = $("#verifyOut");
+  badge.className = "verify-badge";
+  badge.textContent = "verificando…";
+  out.innerHTML = '<div class="muted">Aguarde, checando a cadeia…</div>';
+
+  try{
+    const r = await window.pywebview.api.verificar_cadeia();
+    if(!r){
+      badge.className = "verify-badge err";
+      badge.textContent = "sem resposta";
+      out.innerHTML = '<div class="err">O nó não respondeu à verificação.</div>';
+      return;
+    }
+
+    const ok = r.valid;
+    badge.className = "verify-badge " + (ok ? "ok" : "err");
+    badge.textContent = ok ? "✅ CADEIA ÍNTEGRA" : "❌ CADEIA INVÁLIDA";
+
+    $("#verifyHeight").textContent = r.height ?? "—";
+    $("#verifyBlocks").textContent = r.blocks_checked ?? "—";
+    $("#verifyTxs").textContent    = r.txs_checked ?? "—";
+    $("#verifyTip").textContent    = r.tip_hash ? shortHash(r.tip_hash, 40) : "—";
+
+    let html = "";
+
+    if(r.errors && r.errors.length){
+      html += `<div class="err" style="margin-bottom:8px;">
+                 <b>Erros (${r.errors.length})</b></div>`;
+      html += '<ul class="err-list">' +
+              r.errors.map(e => `<li>${esc(e)}</li>`).join("") +
+              "</ul>";
+    } else {
+      html += '<div class="ok" style="margin-bottom:8px;">Nenhum erro encontrado.</div>';
+    }
+
+    if(r.warnings && r.warnings.length){
+      html += `<div class="warn" style="margin-top:12px;margin-bottom:8px;">
+                 <b>Avisos (${r.warnings.length})</b></div>`;
+      html += '<ul class="warn-list">' +
+              r.warnings.map(w => `<li>${esc(w)}</li>`).join("") +
+              "</ul>";
+    }
+
+    out.innerHTML = html;
+
+    // Atualiza o indicador do cabeçalho
+    const cs = $("#chainStatus");
+    cs.textContent = ok ? "íntegra" : "inválida";
+    cs.style.color = ok ? "var(--ok)" : "var(--err)";
+  }catch(e){
+    badge.className = "verify-badge err";
+    badge.textContent = "erro";
+    out.innerHTML = `<div class="err">Erro: ${esc(e)}</div>`;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", ()=>{
+  const b1 = document.getElementById("btnVerify");
+  const b2 = document.getElementById("btnVerifyFull");
+  if(b1) b1.addEventListener("click", refreshVerify);
+  if(b2) b2.addEventListener("click", refreshVerify);
+});
+
+/* =========================================================
+   REDE
+   ========================================================= */
+$("#btnLocal").addEventListener("click", async ()=>{
+  try{
+    const r = await window.pywebview.api.obter_ips_locais();
+    let html = `<div class="kv"><span>Porta</span><span class="mono">${r.port}</span></div>`;
+    html += `<div class="kv"><span>Loopback</span><span class="mono">${esc(r.loopback)}</span></div>`;
+    (r.lan_addresses||[]).forEach(a=>{
+      html += `<div class="kv"><span>LAN</span><span class="mono">${esc(a)}</span></div>`;
+    });
+    $("#localIps").innerHTML = html;
+  }catch(e){ toast("Erro: "+e, "err"); }
+});
+$("#btnConnect").addEventListener("click", async ()=>{
+  const ip   = $("#peerIp").value.trim();
+  const port = parseInt($("#peerPort").value, 10);
+  if(!ip || !port) return toast("Informe IP e porta","err");
+  try{
+    const r = await window.pywebview.api.conectar_e_sincronizar(ip, port);
+    toast(r.message, r.status === "sucesso" ? "ok" : "err");
+    refreshPeers(); refreshHeader();
+  }catch(e){ toast("Erro: "+e, "err"); }
+});
+async function refreshPeers(){
+  try{
+    const r = await window.pywebview.api.obter_peers_conectados();
+    if(!r.peers || !r.peers.length){
+      $("#peerList").innerHTML = "<div class='muted'>Nenhum par conectado.</div>";
+      return;
+    }
+    let html = "<table><thead><tr><th>IP</th><th>Porta</th></tr></thead><tbody>";
+    r.peers.forEach(p=>{
+      html += `<tr><td class="mono">${esc(p.ip)}</td><td>${p.port}</td></tr>`;
+    });
+    html += "</tbody></table>";
+    $("#peerList").innerHTML = html;
+  }catch(e){}
+}
+$("#btnPeers").addEventListener("click", refreshPeers);
+
+/* =========================================================
+   CABEÇALHO / LOOP DE ATUALIZAÇÃO
+   ========================================================= */
+async function refreshHeader(){
+  try{
+    const r = await window.pywebview.api.obter_cadeia_completa();
+    $("#h").textContent     = r.height ?? r.length ?? "—";
+    $("#tip").textContent   = shortHash(r.chain?.length
+                                ? r.chain[r.chain.length-1]?.hash || ""
+                                : "", 12);
+    $("#mp").textContent    = r.mempool_size;
+    $("#diff").textContent  = r.current_difficulty;
+    $("#mining").textContent= r.is_mining ? "sim" : "não";
+    state.mining            = r.is_mining;
+  }catch(e){}
+  try{
+    const p = await window.pywebview.api.obter_peers_conectados();
+    $("#peers").textContent = p.count;
+  }catch(e){}
+  refreshBalance();
+  if($("#panel-explorer").classList.contains("active")) refreshExplorer();
+}
+</script>
 </body>
 </html>
