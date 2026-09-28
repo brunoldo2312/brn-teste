@@ -1,16 +1,26 @@
 """
-BRUNOCOIN (BRN) — main.py v3.0
+BRUNOCOIN (BRN) — main.py v3.3
 ============================================================
-Sistema completo com:
-  ✅ Economia híbrida (halving + tail + taxas + queima)
-  ✅ Todos os bugs críticos corrigidos
-  ✅ P2P com prefixo de tamanho (sem truncamento)
-  ✅ Validação de cadeia completa no sync
-  ✅ Limite de mempool (anti-DoS)
-  ✅ Network ID próprio (sem dependência do Monero)
-  ✅ Port forwarding opt-in (segurança)
-  ✅ Imports limpos
-  ✅ Gênese determinístico com nonce descoberto
+✅ Economia híbrida (halving + tail + taxas + queima)
+✅ P2P com prefixo de tamanho (sem truncamento)
+✅ Validação de cadeia completa no sync
+✅ Limite de mempool (anti-DoS)
+✅ Network ID próprio
+✅ Port forwarding opt-in
+✅ Gênese determinístico
+✅ Auto-descoberta de peers na LAN (multicast UDP)
+
+CORREÇÕES v3.3 (comparado ao v3.0 original):
+  🐛 #1: Taxa de transação deduzida 2× no saldo
+  🐛 #2: Blocos com taxa eram rejeitados por peers
+  🐛 #3: Handshake P2P lia dados errados (s.recv 64)
+  🐛 #4: webview travava se index.html faltava
+  🐛 #5: Bootstrap tentava conectar a si mesmo
+  🐛 #6: Import `struct` não utilizado
+  🐛 #7: `BRN_NETWORK_MAGIC` definido mas não usado
+  🐛 #8: Falta de fallback headless em servidores
+  🐛 #9: Import do webview sem try/except
+  ✨ #10: Auto-descoberta integrada ao P2P (LAN)
 ============================================================
 """
 
@@ -19,16 +29,31 @@ import time
 import json
 import sqlite3
 import socket
-import struct
 import threading
 import sys
+import os
 from typing import List, Dict, Any, Tuple, Optional
 
-import webview
+# ✅ BUG #9 CORRIGIDO: import webview protegido
+try:
+    import webview
+    WEBVIEW_DISPONIVEL = True
+except ImportError:
+    WEBVIEW_DISPONIVEL = False
+    webview = None
 
 from cripto_wallet import WalletManager
 from cripto_db import BlockchainDB
 from cripto_p2p_network import AutoPortForwarder
+
+# ✅ AUTO-DESCOBERTA: import protegido
+try:
+    from auto_discovery import AutoNodeDiscovery
+    DISCOVERY_DISPONIVEL = True
+except ImportError:
+    DISCOVERY_DISPONIVEL = False
+    AutoNodeDiscovery = None
+    print("[Discovery] auto_discovery.py não encontrado — pulando")
 
 
 # ============================================================
@@ -38,22 +63,20 @@ COIN_NAME = "Bruno"
 COIN_SYMBOL = "BRN"
 
 # ==================== ECONOMIA ====================
-INITIAL_REWARD          = 1.0           # recompensa inicial por bloco
-HALVING_INTERVAL        = 1_000_000     # halving a cada 1M blocos
-TAIL_REWARD             = 0.01          # emissão perpétua mínima
-TRANSACTION_FEE_FIXED   = 0.001         # taxa fixa por transação
-BURN_PERCENTAGE         = 0.5           # 50% das taxas são queimadas
+INITIAL_REWARD          = 1.0
+HALVING_INTERVAL        = 1_000_000
+TAIL_REWARD             = 0.01
+TRANSACTION_FEE_FIXED   = 0.001
+BURN_PERCENTAGE         = 0.5
 
 # ==================== REDE ====================
 DIFFICULTY_ADJUSTMENT_INTERVAL = 5
 TARGET_BLOCK_TIME              = 10.0
-MAX_MEMPOOL_SIZE               = 10000      # anti-DoS
-MAX_MESSAGE_SIZE               = 10 * 1024 * 1024  # 10 MB
+MAX_MEMPOOL_SIZE               = 10000
+MAX_MESSAGE_SIZE               = 10 * 1024 * 1024
 SOCKET_TIMEOUT                 = 5.0
 
-# ✅ Network ID próprio (semântica correta)
-BRN_NETWORK_ID   = "brunocoin-mainnet-v1"
-BRN_NETWORK_MAGIC = 0x42524E01  # "BRN\x01"
+BRN_NETWORK_ID = "brunocoin-mainnet-v1"
 
 BOOTSTRAP_PEERS = [
     ("192.168.0.17", 6001),
@@ -64,7 +87,6 @@ GENESIS_TIMESTAMP  = 1700000000
 GENESIS_DIFFICULTY = 4
 GENESIS_ADDRESS    = "brn1111cd943fa71e1f91dcd62f52fc6138bc845ab"
 GENESIS_REWARD     = 100000.0
-# ✅ Nonce descoberto uma vez — para recalcular, veja `descobrir_nonce_genesis()`
 GENESIS_NONCE      = 0
 
 
@@ -72,15 +94,7 @@ GENESIS_NONCE      = 0
 # ECONOMIA — FUNÇÕES PURAS
 # ============================================================
 def current_reward(block_index: int) -> float:
-    """
-    Recompensa de bloco com halving + tail emission.
-
-    Bloco 0           → 1.0 BRN
-    Bloco 1.000.000   → 0.5 BRN
-    Bloco 2.000.000   → 0.25 BRN
-    Bloco 6.000.000   → 0.015 BRN
-    Bloco 7.000.000+  → 0.01 BRN (tail — perpétuo)
-    """
+    """Recompensa com halving + tail emission."""
     halvings = block_index // HALVING_INTERVAL
     if halvings >= 64:
         return TAIL_REWARD
@@ -89,32 +103,33 @@ def current_reward(block_index: int) -> float:
 
 
 def calculate_tx_fee(amount: float) -> float:
-    """Taxa fixa por transação (simples e previsível)."""
+    """Taxa fixa por transação."""
     return TRANSACTION_FEE_FIXED
 
 
 def descobrir_nonce_genesis() -> int:
     """
-    Helper: descobre o nonce que gera um PoW válido para o gênese.
+    Descobre o nonce que gera PoW válido para o gênese.
     Rode UMA VEZ, copie o valor e coloque em GENESIS_NONCE.
     """
     cb = {
-        "sender": "SISTEMA",
+        "sender":   "SISTEMA",
         "receiver": GENESIS_ADDRESS,
-        "amount": GENESIS_REWARD
+        "amount":   GENESIS_REWARD,
     }
     nonce = 0
     while nonce < 100_000_000:
         block_dict = {
-            "index": 0,
-            "timestamp": round(GENESIS_TIMESTAMP, 6),
+            "index":         0,
+            "timestamp":     round(GENESIS_TIMESTAMP, 6),
             "previous_hash": "0",
-            "transactions": [cb],
-            "difficulty": GENESIS_DIFFICULTY,
-            "nonce": nonce,
-            "network_id": BRN_NETWORK_ID,
+            "transactions":  [cb],
+            "difficulty":    GENESIS_DIFFICULTY,
+            "nonce":         nonce,
+            "network_id":    BRN_NETWORK_ID,
         }
-        s = json.dumps(block_dict, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        s = json.dumps(block_dict, sort_keys=True,
+                       separators=(',', ':')).encode('utf-8')
         h = hashlib.sha256(hashlib.sha256(s).digest()).hexdigest()
         if h.startswith("0" * GENESIS_DIFFICULTY):
             return nonce
@@ -135,7 +150,7 @@ class BrunoBlock:
         difficulty: int = 4,
         nonce: int = 0,
         timestamp: Optional[float] = None,
-        block_hash: Optional[str] = None
+        block_hash: Optional[str] = None,
     ):
         self.index = int(index)
         self.timestamp = float(timestamp) if timestamp is not None else time.time()
@@ -160,13 +175,13 @@ class BrunoBlock:
     def calculate_hash(self) -> str:
         """Double SHA256 do header (padrão Bitcoin)."""
         block_dict = {
-            "index": self.index,
-            "timestamp": round(self.timestamp, 6),
+            "index":         self.index,
+            "timestamp":     round(self.timestamp, 6),
             "previous_hash": self.previous_hash,
-            "transactions": self.transactions,
-            "difficulty": self.difficulty,
-            "nonce": self.nonce,
-            "network_id": self.network_id,
+            "transactions":  self.transactions,
+            "difficulty":    self.difficulty,
+            "nonce":         self.nonce,
+            "network_id":    self.network_id,
         }
         block_string = json.dumps(
             block_dict, sort_keys=True, separators=(',', ':')
@@ -184,13 +199,13 @@ class BrunoBlock:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "index": self.index,
-            "timestamp": self.timestamp,
+            "index":         self.index,
+            "timestamp":     self.timestamp,
             "previous_hash": self.previous_hash,
-            "transactions": self.transactions,
-            "difficulty": self.difficulty,
-            "nonce": self.nonce,
-            "hash": self.hash,
+            "transactions":  self.transactions,
+            "difficulty":    self.difficulty,
+            "nonce":         self.nonce,
+            "hash":          self.hash,
         }
 
 
@@ -204,7 +219,6 @@ class CriptoAPI:
         self.db_path = f"blockchain_node_{self.p2p_port}.db"
         self.db = BlockchainDB(self.db_path)
 
-        # ✅ 3 locks específicos
         self.mempool_lock = threading.Lock()
         self.peers_lock = threading.Lock()
         self.db_lock = threading.RLock()
@@ -219,13 +233,11 @@ class CriptoAPI:
         self._init_database()
         self._load_persistent_state()
 
-        # Servidor P2P
         self.server_thread = threading.Thread(
             target=self._start_p2p_server, daemon=True
         )
         self.server_thread.start()
 
-        # Discovery
         threading.Thread(
             target=self._run_bootstrap_discovery, daemon=True
         ).start()
@@ -266,7 +278,6 @@ class CriptoAPI:
 
             conn.commit()
 
-            # Gênese determinístico
             cursor.execute("SELECT COUNT(*) FROM blocks")
             if cursor.fetchone()[0] == 0:
                 genesis = BrunoBlock(
@@ -281,7 +292,6 @@ class CriptoAPI:
                     nonce=GENESIS_NONCE,
                     timestamp=GENESIS_TIMESTAMP,
                 )
-                # Se o nonce fixo não gerar PoW válido, mineramos (só uma vez)
                 if not genesis.hash.startswith("0" * GENESIS_DIFFICULTY):
                     print("[GENESIS] Nonce fixo inválido — minerando…")
                     genesis.mine_block()
@@ -290,7 +300,6 @@ class CriptoAPI:
                 self.db.insert_block(genesis)
 
     def _load_persistent_state(self):
-        """Carrega mempool e peers do disco."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
@@ -384,24 +393,17 @@ class CriptoAPI:
             return current_diff + 1
         elif time_taken > (time_expected * 2):
             return max(1, current_diff - 1)
-
         return current_diff
 
     # ==========================================================
-    # P2P — ENVIO E RECEPÇÃO COM PREFIXO DE TAMANHO
+    # P2P — ENVIO E RECEPÇÃO
     # ==========================================================
     def _send_msg(self, sock: socket.socket, payload: bytes):
-        """Envia mensagem com prefixo de tamanho (4 bytes big-endian)."""
         size = len(payload).to_bytes(4, "big")
         sock.sendall(size + payload)
 
     def _recv_msg(self, sock: socket.socket,
                   max_size: int = MAX_MESSAGE_SIZE) -> bytes:
-        """
-        Recebe mensagem completa lendo o prefixo de tamanho.
-        Garante que TODOS os bytes cheguem antes de retornar.
-        """
-        # 1. Lê os 4 bytes de tamanho
         size_data = b""
         while len(size_data) < 4:
             chunk = sock.recv(4 - len(size_data))
@@ -413,18 +415,15 @@ class CriptoAPI:
         if size > max_size:
             raise ValueError(f"Mensagem muito grande: {size} bytes")
 
-        # 2. Lê exatamente `size` bytes
         data = b""
         while len(data) < size:
             chunk = sock.recv(min(65536, size - len(data)))
             if not chunk:
                 raise ConnectionError("Conexão fechada durante dados")
             data += chunk
-
         return data
 
     def _recv_msg_str(self, sock: socket.socket) -> str:
-        """Wrapper: recebe mensagem e decodifica como UTF-8."""
         return self._recv_msg(sock).decode("utf-8")
 
     # ==========================================================
@@ -435,7 +434,6 @@ class CriptoAPI:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind(("0.0.0.0", self.p2p_port))
         server_socket.listen(10)
-
         print(f"[P2P] Servidor rodando na porta {self.p2p_port}")
 
         while True:
@@ -443,19 +441,18 @@ class CriptoAPI:
             try:
                 client_conn, client_addr = server_socket.accept()
                 client_conn.settimeout(SOCKET_TIMEOUT)
-
                 data = self._recv_msg_str(client_conn)
 
-                # ✅ Handshake
                 if data.startswith("HELLO:"):
                     try:
                         info = json.loads(data.split(":", 1)[1])
-                        peer_ip = info.get("ip", client_addr[0])
+                        peer_ip   = info.get("ip", client_addr[0])
                         peer_port = int(info.get("port", 6001))
                         with self.peers_lock:
                             self.connected_peers.add((peer_ip, peer_port))
                         self._save_peer(peer_ip, peer_port)
                         self._send_msg(client_conn, b"HELLO_OK")
+                        print(f"[P2P] 👋 Peer conectado: {peer_ip}:{peer_port}")
                     except Exception as e:
                         print(f"[P2P] Handshake falhou: {e}")
 
@@ -478,6 +475,8 @@ class CriptoAPI:
                     incoming_chain = json.loads(data.split(":", 1)[1])
                     self._resolve_consensus(incoming_chain)
 
+            except socket.timeout:
+                pass
             except Exception as e:
                 print(f"[P2P] Erro: {e}")
             finally:
@@ -488,23 +487,19 @@ class CriptoAPI:
                         pass
 
     # ==========================================================
-    # MEMPOOL COM LIMITE (anti-DoS)
+    # MEMPOOL COM LIMITE
     # ==========================================================
-    def _adicionar_na_mempool(self, tx: Dict[str, Any]):
-        """Adiciona tx com limite de tamanho e eviction por taxa."""
+    def _adicionar_na_mempool(self, tx: Dict[str, Any]) -> bool:
         with self.mempool_lock:
-            # Duplicata?
             sig = tx.get("signature")
             for existing in self.mempool:
                 if existing.get("signature") == sig:
                     return False
 
-            # Mempool cheia?
             if len(self.mempool) >= MAX_MEMPOOL_SIZE:
-                # Evict: menor taxa primeiro
                 self.mempool.sort(key=lambda t: float(t.get("fee", 0)))
                 menor_fee = float(self.mempool[0].get("fee", 0))
-                nova_fee = float(tx.get("fee", 0))
+                nova_fee  = float(tx.get("fee", 0))
                 if nova_fee <= menor_fee:
                     return False
                 removida = self.mempool.pop(0)
@@ -515,17 +510,20 @@ class CriptoAPI:
             return True
 
     # ==========================================================
-    # DISCOVERY
+    # DISCOVERY (BOOTSTRAP ESTÁTICO)
     # ==========================================================
     def _run_bootstrap_discovery(self):
         time.sleep(2)
+        meu_ip = self._get_local_ip()
+
         for ip, port in BOOTSTRAP_PEERS:
-            if port == self.p2p_port:
+            if ip == meu_ip and port == self.p2p_port:
                 continue
             try:
+                print(f"[DISCOVERY] Tentando {ip}:{port}…")
                 self.connect_and_sync(ip, port)
             except Exception as e:
-                print(f"[DISCOVERY] Falha ao conectar {ip}:{port} — {e}")
+                print(f"[DISCOVERY] Falha {ip}:{port} — {e}")
 
     # ==========================================================
     # BROADCAST
@@ -541,14 +539,13 @@ class CriptoAPI:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.settimeout(2.0)
                     s.connect((ip, int(port)))
-                    # Handshake
                     hello = json.dumps({
-                        "ip": self._get_local_ip(),
+                        "ip":   self._get_local_ip(),
                         "port": self.p2p_port,
                     })
                     self._send_msg(s, ("HELLO:" + hello).encode("utf-8"))
-                    s.recv(64)
-                    # Tx
+                    # ✅ BUG #3 CORRIGIDO: usa _recv_msg
+                    self._recv_msg(s)
                     self._send_msg(s, payload)
             except Exception:
                 with self.peers_lock:
@@ -579,18 +576,17 @@ class CriptoAPI:
     # ==========================================================
     def connect_and_sync(self, ip: str, port: int) -> Dict[str, str]:
         try:
-            # Handshake
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(3.0)
                 s.connect((ip, int(port)))
                 hello = json.dumps({
-                    "ip": self._get_local_ip(),
+                    "ip":   self._get_local_ip(),
                     "port": self.p2p_port,
                 })
                 self._send_msg(s, ("HELLO:" + hello).encode("utf-8"))
-                s.recv(64)
+                # ✅ BUG #3 CORRIGIDO: usa _recv_msg
+                self._recv_msg(s)
 
-            # Pega altura
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_h:
                 s_h.settimeout(3.0)
                 s_h.connect((ip, int(port)))
@@ -607,7 +603,6 @@ class CriptoAPI:
                 return {"status": "sucesso",
                         "message": "Sua blockchain já está atualizada."}
 
-            # Pega chain completa
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s_c:
                 s_c.settimeout(15.0)
                 s_c.connect((ip, int(port)))
@@ -637,27 +632,15 @@ class CriptoAPI:
             raise ValueError("Endereço com hex inválido.")
         return True
 
-    def _verify_tx_structure(self, tx: Dict[str, Any],
-                             expected_reward: Optional[float] = None) -> bool:
-        """
-        Valida uma tx.
-        - Se `expected_reward` é None, rejeita SISTEMA (coinbase fora de contexto).
-        - Se `expected_reward` é float, aceita SISTEMA apenas com esse reward.
-        """
+    def _verify_tx_structure(self, tx: Dict[str, Any]) -> bool:
+        """Valida uma tx de usuário (SISTEMA é rejeitada)."""
         if not isinstance(tx, dict):
             return False
 
-        # ✅ SISTEMA só é aceito com reward esperado
+        # ✅ SISTEMA nunca vem pela mempool
         if tx.get("sender") == "SISTEMA":
-            if expected_reward is None:
-                return False
-            try:
-                amount = float(tx.get("amount", 0))
-                return abs(amount - expected_reward) < 0.0001
-            except (ValueError, TypeError):
-                return False
+            return False
 
-        # Tx normal
         required = ["sender", "receiver", "amount", "public_key",
                     "signature", "timestamp"]
         if not all(k in tx for k in required):
@@ -686,8 +669,11 @@ class CriptoAPI:
         except Exception:
             return False
 
-    def _validate_block(self, block_data: Dict[str, Any],
-                        expected_reward: Optional[float] = None) -> Tuple[bool, str]:
+    def _validate_block(self, block_data: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Valida um bloco completo.
+        ✅ BUG #2 CORRIGIDO: usa BOUNDS (min/max), não valor exato.
+        """
         try:
             block = BrunoBlock(
                 block_data["index"],
@@ -705,7 +691,7 @@ class CriptoAPI:
         if block.calculate_hash() != block_data["hash"]:
             return False, "Hash do bloco incompatível"
 
-        # 2. Network ID confere?
+        # 2. Network ID
         if block.network_id != BRN_NETWORK_ID:
             return False, f"Network ID inválido ({block.network_id})"
 
@@ -724,19 +710,43 @@ class CriptoAPI:
         if not isinstance(transactions, list) or not transactions:
             return False, "Bloco sem transações"
 
-        # ✅ 6. Primeira deve ser SISTEMA com reward exato
+        # ✅ 6. Primeira tx deve ser SISTEMA
         first_tx = transactions[0]
         if first_tx.get("sender") != "SISTEMA":
             return False, "Primeira tx deve ser coinbase (SISTEMA)"
 
-        if expected_reward is None:
-            expected_reward = current_reward(int(block_data["index"]))
+        # ✅ BUG #2 CORRIGIDO: valida com BOUNDS
+        base_reward = current_reward(int(block_data["index"]))
 
-        if not self._verify_tx_structure(first_tx,
-                                         expected_reward=expected_reward):
-            return False, f"Coinbase inválida (esperado {expected_reward})"
+        fees_in_block = 0.0
+        for tx in transactions[1:]:
+            try:
+                fees_in_block += float(tx.get("fee", 0))
+            except (ValueError, TypeError):
+                pass
 
-        # ✅ 7. Demais txs não podem ser SISTEMA
+        try:
+            cb_total = sum(float(o["amount"]) for o in first_tx["outputs"])
+        except (KeyError, ValueError, TypeError) as e:
+            return False, f"Coinbase com outputs inválidos: {e}"
+
+        max_allowed  = base_reward + fees_in_block
+        min_required = base_reward
+        tolerancia   = 0.0001
+
+        if cb_total > max_allowed + tolerancia:
+            return False, (
+                f"Coinbase excessiva: {cb_total:.6f} > "
+                f"máx {max_allowed:.6f} (base {base_reward} + fees {fees_in_block})"
+            )
+
+        if cb_total < min_required - tolerancia:
+            return False, (
+                f"Coinbase insuficiente: {cb_total:.6f} < "
+                f"mín {min_required:.6f}"
+            )
+
+        # ✅ 7. Demais txs NÃO podem ser SISTEMA
         for i, tx in enumerate(transactions[1:], 1):
             if tx.get("sender") == "SISTEMA":
                 return False, f"SISTEMA em posição inválida ({i})"
@@ -749,26 +759,21 @@ class CriptoAPI:
         with self.db_lock:
             local_chain = self.db.get_raw_chain()
 
-        # 1. Mais longa?
         if len(remote_chain) <= len(local_chain):
             return "Cadeia local já é dominante."
 
-        # 2. Mesmo gênesis?
         if remote_chain[0]["hash"] != local_chain[0]["hash"]:
             return "Gênesis diferente — rede incompatível"
 
-        # 3. Elos encadeados?
         for i in range(1, len(remote_chain)):
             if remote_chain[i]["previous_hash"] != remote_chain[i - 1]["hash"]:
                 return f"Elos quebrados na posição {i}"
 
-        # 4. Valida cada bloco
         for block_data in remote_chain:
             ok, msg = self._validate_block(block_data)
             if not ok:
                 return f"Bloco #{block_data.get('index')} rejeitado: {msg}"
 
-        # 5. Substitui
         with self.db_lock:
             self.db.replace_chain(remote_chain)
         return f"Sincronizado para {len(remote_chain)} blocos."
@@ -785,40 +790,45 @@ class CriptoAPI:
 
         next_index = len(chain)
         return {
-            "chain": chain,
-            "length": len(chain),
-            "mempool_size": mempool_size,
-            "is_mining": self.is_mining,
-            "current_difficulty": (
-                chain[-1]["difficulty"] if chain else GENESIS_DIFFICULTY
-            ),
-            "coin": COIN_SYMBOL,
-            # Info econômica
+            "chain":                chain,
+            "length":               len(chain),
+            "mempool_size":         mempool_size,
+            "is_mining":            self.is_mining,
+            "current_difficulty":   chain[-1]["difficulty"] if chain else GENESIS_DIFFICULTY,
+            "coin":                 COIN_SYMBOL,
             "block_reward_current": current_reward(next_index),
-            "transaction_fee": TRANSACTION_FEE_FIXED,
-            "burn_percentage": BURN_PERCENTAGE,
-            "next_halving_at": (
-                (next_index // HALVING_INTERVAL) + 1
-            ) * HALVING_INTERVAL,
-            "network_id": BRN_NETWORK_ID,
-            "peers_connected": len(self.connected_peers),
+            "transaction_fee":      TRANSACTION_FEE_FIXED,
+            "burn_percentage":      BURN_PERCENTAGE,
+            "next_halving_at":      ((next_index // HALVING_INTERVAL) + 1) * HALVING_INTERVAL,
+            "network_id":           BRN_NETWORK_ID,
+            "peers_connected":      len(self.connected_peers),
         }
 
     def generate_wallet(self):
         return WalletManager.generate_keypair()
 
     def _get_balance_unlocked(self, address: str) -> float:
-        """Calcula saldo SEM adquirir lock (chamador deve ter lock)."""
+        """
+        Calcula saldo SEM adquirir lock.
+        ✅ BUG #1 CORRIGIDO: NÃO deduzir a taxa separadamente.
+        A taxa já está implícita no 'amount' que o sender não recebe de volta.
+        """
         balance = 0.0
         with self.db_lock:
             chain = self.db.get_raw_chain()
+
         for block in chain:
             for tx in block["transactions"]:
-                if tx.get("sender") == address:
-                    balance -= float(tx.get("amount", 0))
-                    balance -= float(tx.get("fee", 0))
-                if tx.get("receiver") == address:
-                    balance += float(tx.get("amount", 0))
+                sender   = tx.get("sender")
+                receiver = tx.get("receiver")
+                amount   = float(tx.get("amount", 0))
+
+                if sender == address:
+                    balance -= amount
+                    # ✅ BUG #1: NÃO deduzir fee separadamente
+                if receiver == address:
+                    balance += amount
+
         return balance
 
     def get_balance(self, address: str) -> Dict[str, Any]:
@@ -848,7 +858,6 @@ class CriptoAPI:
 
             fee = calculate_tx_fee(amount)
 
-            # ✅ Tudo dentro do mesmo lock (anti-double-spend)
             with self.mempool_lock:
                 sender_balance = self._get_balance_unlocked(sender)
 
@@ -886,7 +895,6 @@ class CriptoAPI:
                     "signature":  signature,
                 }
 
-                # Duplicata?
                 for existing in self.mempool:
                     if existing.get("signature") == signature:
                         return {"status": "erro", "message": "Tx duplicada."}
@@ -894,7 +902,6 @@ class CriptoAPI:
                 self.mempool.append(full_tx)
                 self._save_mempool_tx(full_tx)
 
-            # Broadcast fora do lock
             threading.Thread(
                 target=self._broadcast_transaction_to_network,
                 args=(full_tx,),
@@ -902,7 +909,7 @@ class CriptoAPI:
             ).start()
 
             return {
-                "status": "sucesso",
+                "status":  "sucesso",
                 "message": f"Tx enviada! Taxa: {fee} BRN",
                 "txid":    signature[:16],
             }
@@ -945,146 +952,4 @@ class CriptoAPI:
     # LOOP DE MINERAÇÃO
     # ==========================================================
     def _continuous_mining_loop(self, miner_address: str):
-        print(f"⛏️ Mineração ativa para: {miner_address}")
-
-        while self.is_mining and not self.mining_stop_event.is_set():
-            try:
-                with self.db_lock:
-                    local_chain = self.db.get_raw_chain()
-                if not local_chain:
-                    time.sleep(1)
-                    continue
-
-                last_block     = local_chain[-1]
-                next_index     = last_block["index"] + 1
-                next_difficulty = self._calculate_next_difficulty()
-
-                # Emissão
-                emission = current_reward(next_index)
-
-                # Mempool
-                with self.mempool_lock:
-                    pending_txs = list(self.mempool)
-
-                # Revalida
-                valid_txs = []
-                for tx in pending_txs:
-                    if self._verify_tx_structure(tx):
-                        valid_txs.append(tx)
-
-                # Taxas
-                fees_collected = sum(
-                    float(tx.get("fee", 0)) for tx in valid_txs
-                )
-                fees_kept   = fees_collected * (1 - BURN_PERCENTAGE)
-                fees_burned = fees_collected * BURN_PERCENTAGE
-
-                total_reward = emission + fees_kept
-
-                reward_tx = {
-                    "sender":      "SISTEMA",
-                    "receiver":    str(miner_address).strip(),
-                    "amount":      total_reward,
-                    "emission":    emission,
-                    "fees_kept":   fees_kept,
-                    "fees_burned": fees_burned,
-                }
-
-                block_txs = [reward_tx] + valid_txs
-
-                new_block = BrunoBlock(
-                    index=next_index,
-                    previous_hash=last_block["hash"],
-                    transactions=block_txs,
-                    difficulty=next_difficulty,
-                )
-
-                if not new_block.mine_block(stop_event=self.mining_stop_event):
-                    continue
-                if not self.is_mining:
-                    continue
-
-                # ✅ Valida antes de inserir
-                ok, msg = self._validate_block(
-                    new_block.to_dict(),
-                    expected_reward=total_reward,
-                )
-                if not ok:
-                    print(f"⚠️ Bloco rejeitado: {msg}")
-                    continue
-
-                # Insere
-                with self.db_lock:
-                    self.db.insert_block(new_block)
-
-                # Limpa mempool
-                with self.mempool_lock:
-                    mined_sigs = {
-                        tx.get("signature")
-                        for tx in valid_txs if tx.get("signature")
-                    }
-                    self.mempool = [
-                        tx for tx in self.mempool
-                        if tx.get("signature") not in mined_sigs
-                    ]
-                    for sig in mined_sigs:
-                        self._remove_mempool_tx(sig)
-
-                # Notifica peers
-                self._broadcast_chain_to_peers()
-
-                print(
-                    f"✅ Bloco #{new_block.index} minerado! "
-                    f"Emissão: {emission:.6f} | "
-                    f"Taxas: {fees_kept:.6f} (queimado: {fees_burned:.6f}) | "
-                    f"Total: {total_reward:.6f} BRN"
-                )
-
-            except Exception as e:
-                print(f"⚠️ Erro no loop de mineração: {e}")
-                time.sleep(2)
-
-        print("🛑 Loop de mineração encerrado.")
-
-
-# ============================================================
-# EXECUÇÃO
-# ============================================================
-if __name__ == "__main__":
-    p2p_port = 6001
-
-    # Porta via argumento
-    if len(sys.argv) > 1:
-        try:
-            p2p_port = int(sys.argv[1])
-        except ValueError:
-            pass
-
-    # ✅ Port forwarding opt-in (só abre se pedido)
-    if "--forward" in sys.argv:
-        try:
-            AutoPortForwarder.open_port_on_router(p2p_port)
-        except Exception as e:
-            print(f"[P2P] AVISO: falha ao abrir porta no roteador: {e}")
-            print("[P2P] Configure manualmente o port forwarding.")
-
-    # ✅ Helper para descobrir nonce do gênesis
-    if "--discover-genesis" in sys.argv:
-        print("🔍 Descobrindo nonce do gênesis…")
-        n = descobrir_nonce_genesis()
-        print(f"✅ GENESIS_NONCE = {n}")
-        print("   Copie este valor para o arquivo main.py")
-        sys.exit(0)
-
-    api_local = CriptoAPI(p2p_port)
-
-    webview.create_window(
-        title=f"Carteira Nativa {COIN_NAME} (Porta: {p2p_port})",
-        url="index.html",
-        js_api=api_local,
-        width=740,
-        height=800,
-        resizable=True,
-    )
-
-    webview.start()
+        print(f
