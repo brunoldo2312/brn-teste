@@ -1,9 +1,10 @@
-"""SQLite com WAL, mmap, UTXO set, mempool persistente e poda."""
+"""SQLite com WAL, mmap, UTXO set, mempool persistente, poda E rede P2P."""
 import sqlite3
 import zlib
 import time
 import threading
 import orjson
+
 
 class ChainDB:
     def __init__(self, path: str):
@@ -72,24 +73,119 @@ class ChainDB:
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+
+            -- ✅ BUG #2 CORRIGIDO: address como PRIMARY KEY
+            CREATE TABLE IF NOT EXISTS peers (
+                address      TEXT PRIMARY KEY NOT NULL,
+                node_id      TEXT NOT NULL,
+                genesis_hash TEXT NOT NULL,
+                version      TEXT,
+                height       INTEGER DEFAULT 0,
+                is_miner     INTEGER DEFAULT 0,
+                public_key   TEXT,
+                metadata     TEXT,
+                first_seen   INTEGER NOT NULL,
+                last_seen    INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_peers_last_seen ON peers(last_seen);
+            CREATE INDEX IF NOT EXISTS idx_peers_genesis   ON peers(genesis_hash);
+            CREATE INDEX IF NOT EXISTS idx_peers_node_id   ON peers(node_id);
+
+            CREATE TABLE IF NOT EXISTS network_events (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp    INTEGER NOT NULL,
+                event_type   TEXT NOT NULL,
+                peer_address TEXT,
+                details      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_ts ON network_events(timestamp DESC);
             """)
 
-    # ---------- blocos ----------
+    # ==================== BLOCOS ====================
     def add_block(self, block: dict):
+        """⚠️ DEPRECATED — use accept_block_atomic() para consistência."""
+        # Mantido para compatibilidade com código antigo (ex: gênese)
         with self.lock:
-            blob = zlib.compress(orjson.dumps(block), level=6)
-            self.conn.execute(
-                "INSERT INTO blocks(height,hash,prev_hash,timestamp,nonce,merkle,difficulty,raw)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (block["height"], block["hash"], block["prev_hash"],
-                 block["timestamp"], block["nonce"], block["merkle"],
-                 block["difficulty"], blob),
-            )
-            for tx in block["transactions"]:
+            self.conn.execute("BEGIN IMMEDIATE TRANSACTION")
+            try:
+                blob = zlib.compress(orjson.dumps(block), level=6)
                 self.conn.execute(
-                    "INSERT OR REPLACE INTO transactions(txid,block_height) VALUES (?,?)",
-                    (tx["txid"], block["height"]),
+                    "INSERT INTO blocks(height,hash,prev_hash,timestamp,nonce,merkle,difficulty,raw)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (block["height"], block["hash"], block["prev_hash"],
+                     block["timestamp"], block["nonce"], block["merkle"],
+                     block["difficulty"], blob),
                 )
+                for tx in block["transactions"]:
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO transactions(txid,block_height) VALUES (?,?)",
+                        (tx["txid"], block["height"]),
+                    )
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+
+    # ✅ BUG #1 CORRIGIDO: aceitação atômica de bloco inteiro
+    def accept_block_atomic(self, block: dict):
+        """
+        Aceita um bloco INTEIRO em uma única transação SQL.
+        - Insere o bloco
+        - Registra transações
+        - Marca UTXOs gastos
+        - Cria novos UTXOs
+        - Remove txs da mempool
+        Se algo falhar, TUDO é revertido.
+        """
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE TRANSACTION")
+            try:
+                # 1. Insere o bloco
+                blob = zlib.compress(orjson.dumps(block), level=6)
+                self.conn.execute(
+                    "INSERT INTO blocks(height,hash,prev_hash,timestamp,nonce,merkle,difficulty,raw)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (block["height"], block["hash"], block["prev_hash"],
+                     block["timestamp"], block["nonce"], block["merkle"],
+                     block["difficulty"], blob),
+                )
+
+                # 2. Processa cada transação
+                for i, tx in enumerate(block["transactions"]):
+                    is_coinbase = (i == 0)
+
+                    # Registra no índice
+                    self.conn.execute(
+                        "INSERT OR REPLACE INTO transactions(txid,block_height) VALUES (?,?)",
+                        (tx["txid"], block["height"]),
+                    )
+
+                    # Marca UTXOs gastos (exceto coinbase)
+                    if not is_coinbase:
+                        for inp in tx["inputs"]:
+                            self.conn.execute(
+                                "UPDATE utxos SET spent=1, spent_by=? "
+                                "WHERE txid=? AND vout=? AND spent=0",
+                                (tx["txid"], inp["txid"], inp["vout"]),
+                            )
+
+                    # Cria novos UTXOs
+                    for j, out in enumerate(tx["outputs"]):
+                        self.conn.execute(
+                            "INSERT OR REPLACE INTO utxos"
+                            "(txid,vout,address,amount,pubkey,block_height,spent)"
+                            " VALUES (?,?,?,?,?,?,0)",
+                            (tx["txid"], j, out["address"], out["amount"],
+                             out.get("pubkey", ""), block["height"]),
+                        )
+
+                    # Remove da mempool
+                    self.conn.execute("DELETE FROM mempool WHERE txid=?", (tx["txid"],))
+
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
 
     def get_block(self, height: int) -> dict | None:
         row = self.conn.execute("SELECT raw FROM blocks WHERE height=?", (height,)).fetchone()
@@ -121,7 +217,7 @@ class ChainDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    # ---------- UTXO ----------
+    # ==================== UTXO ====================
     def balance(self, address: str) -> int:
         row = self.conn.execute(
             "SELECT COALESCE(SUM(amount),0) AS s FROM utxos WHERE address=? AND spent=0",
@@ -137,6 +233,9 @@ class ChainDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_utxos(self, address: str) -> list[dict]:
+        return self.utxos_for(address)
+
     def get_utxo(self, txid: str, vout: int) -> dict | None:
         row = self.conn.execute(
             "SELECT * FROM utxos WHERE txid=? AND vout=? AND spent=0", (txid, vout)
@@ -144,45 +243,58 @@ class ChainDB:
         return dict(row) if row else None
 
     def apply_tx(self, tx: dict, height: int, coinbase: bool = False):
+        """Aplica uma tx individual (uso interno). Prefira accept_block_atomic()."""
         with self.lock:
-            if not coinbase:
-                for inp in tx["inputs"]:
+            self.conn.execute("BEGIN IMMEDIATE TRANSACTION")
+            try:
+                if not coinbase:
+                    for inp in tx["inputs"]:
+                        self.conn.execute(
+                            "UPDATE utxos SET spent=1, spent_by=? WHERE txid=? AND vout=? AND spent=0",
+                            (tx["txid"], inp["txid"], inp["vout"]),
+                        )
+                for i, out in enumerate(tx["outputs"]):
                     self.conn.execute(
-                        "UPDATE utxos SET spent=1, spent_by=? WHERE txid=? AND vout=? AND spent=0",
-                        (tx["txid"], inp["txid"], inp["vout"]),
+                        "INSERT OR REPLACE INTO utxos"
+                        "(txid,vout,address,amount,pubkey,block_height,spent)"
+                        " VALUES (?,?,?,?,?,?,0)",
+                        (tx["txid"], i, out["address"], out["amount"],
+                         out.get("pubkey", ""), height),
                     )
-            for i, out in enumerate(tx["outputs"]):
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO utxos"
-                    "(txid,vout,address,amount,pubkey,block_height,spent)"
-                    " VALUES (?,?,?,?,?,?,0)",
-                    (tx["txid"], i, out["address"], out["amount"],
-                     out.get("pubkey", ""), height),
-                )
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
 
     def rollback_block(self, height: int):
-        """Desfaz bloco (usado em reorg)."""
         with self.lock:
             block = self.get_block(height)
             if not block:
                 return
-            for tx in reversed(block["transactions"]):
-                for i, out in enumerate(tx["outputs"]):
-                    self.conn.execute(
-                        "DELETE FROM utxos WHERE txid=? AND vout=?", (tx["txid"], i)
-                    )
-                if block["height"] > 0:
-                    for inp in tx.get("inputs", []):
-                        if inp["txid"] == "0" * 64:
-                            continue
-                        self.conn.execute(
-                            "UPDATE utxos SET spent=0, spent_by=NULL WHERE txid=? AND vout=?",
-                            (inp["txid"], inp["vout"]),
-                        )
-                self.conn.execute("DELETE FROM transactions WHERE txid=?", (tx["txid"],))
-            self.conn.execute("DELETE FROM blocks WHERE height=?", (height,))
 
-    # ---------- mempool ----------
+            self.conn.execute("BEGIN IMMEDIATE TRANSACTION")
+            try:
+                for tx in reversed(block["transactions"]):
+                    for i in range(len(tx["outputs"])):
+                        self.conn.execute(
+                            "DELETE FROM utxos WHERE txid=? AND vout=?", (tx["txid"], i)
+                        )
+                    if block["height"] > 0:
+                        for inp in tx.get("inputs", []):
+                            if inp["txid"] == "0" * 64:
+                                continue
+                            self.conn.execute(
+                                "UPDATE utxos SET spent=0, spent_by=NULL WHERE txid=? AND vout=?",
+                                (inp["txid"], inp["vout"]),
+                            )
+                    self.conn.execute("DELETE FROM transactions WHERE txid=?", (tx["txid"],))
+                self.conn.execute("DELETE FROM blocks WHERE height=?", (height,))
+                self.conn.execute("COMMIT")
+            except Exception:
+                self.conn.execute("ROLLBACK")
+                raise
+
+    # ==================== MEMPOOL ====================
     def add_mempool(self, tx: dict, fee: int) -> bool:
         with self.lock:
             try:
@@ -222,7 +334,7 @@ class ChainDB:
         with self.lock:
             self.conn.execute("DELETE FROM mempool WHERE txid=?", (txid,))
 
-    # ---------- poda / snapshot ----------
+    # ==================== PODA / SNAPSHOT ====================
     def prune_spent_utxos(self, keep_height: int = 1000) -> int:
         cutoff = max(0, self.height() - keep_height)
         with self.lock:
@@ -242,7 +354,7 @@ class ChainDB:
     def count_utxos(self) -> int:
         return self.conn.execute("SELECT COUNT(*) AS c FROM utxos WHERE spent=0").fetchone()["c"]
 
-    # ---------- meta ----------
+    # ==================== META ====================
     def set_meta(self, key: str, value: str):
         with self.lock:
             self.conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", (key, value))
@@ -251,5 +363,103 @@ class ChainDB:
         row = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row["value"] if row else None
 
+    # ==================== PEERS (BUG #2 CORRIGIDO) ====================
+    def upsert_peer(self, node_id: str, address: str, genesis_hash: str,
+                    version: str = "?", height: int = 0,
+                    is_miner: bool = False, public_key: str = "",
+                    metadata: dict | None = None) -> bool:
+        """
+        Adiciona ou atualiza um peer.
+        Se o mesmo endereço vier com node_id diferente, o node_id é atualizado.
+        Retorna True se for um peer novo (endereço nunca visto).
+        """
+        with self.lock:
+            agora = int(time.time())
+
+            existente = self.conn.execute(
+                "SELECT node_id FROM peers WHERE address=?", (address,)
+            ).fetchone()
+            novo = existente is None
+            node_id_antigo = existente["node_id"] if existente else None
+
+            self.conn.execute("""
+                INSERT INTO peers
+                    (address, node_id, genesis_hash, version, height,
+                     is_miner, public_key, metadata, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(address) DO UPDATE SET
+                    node_id    = excluded.node_id,
+                    genesis_hash = excluded.genesis_hash,
+                    version    = excluded.version,
+                    height     = excluded.height,
+                    is_miner   = excluded.is_miner,
+                    public_key = excluded.public_key,
+                    metadata   = excluded.metadata,
+                    last_seen  = excluded.last_seen
+            """, (
+                address, node_id, genesis_hash, version, height,
+                1 if is_miner else 0, public_key,
+                orjson.dumps(metadata or {}).decode(),
+                agora, agora
+            ))
+
+            if novo:
+                self._log_event("peer_joined", address, f"node_id={node_id[:12]}…")
+            elif node_id_antigo and node_id_antigo != node_id:
+                self._log_event("peer_node_changed", address,
+                                f"{node_id_antigo[:12]}… → {node_id[:12]}…")
+
+            return novo
+
+    def listar_peers(self, apenas_ativos: bool = True, janela: int = 300) -> list[dict]:
+        if apenas_ativos:
+            cutoff = int(time.time()) - janela
+            rows = self.conn.execute(
+                "SELECT * FROM peers WHERE last_seen >= ? ORDER BY last_seen DESC",
+                (cutoff,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute("SELECT * FROM peers ORDER BY last_seen DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def contar_peers(self, apenas_ativos: bool = True, janela: int = 300) -> int:
+        if apenas_ativos:
+            cutoff = int(time.time()) - janela
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM peers WHERE last_seen >= ?", (cutoff,)
+            ).fetchone()
+        else:
+            row = self.conn.execute("SELECT COUNT(*) AS n FROM peers").fetchone()
+        return int(row["n"])
+
+    def remover_peer(self, node_id: str):
+        with self.lock:
+            self.conn.execute("DELETE FROM peers WHERE node_id=?", (node_id,))
+
+    def remover_peer_por_endereco(self, address: str):
+        with self.lock:
+            self.conn.execute("DELETE FROM peers WHERE address=?", (address,))
+
+    def limpar_peers_inativos(self, janela: int = 1800):
+        with self.lock:
+            self.conn.execute("DELETE FROM peers WHERE last_seen < ?",
+                              (int(time.time()) - janela,))
+
+    # ==================== EVENTOS ====================
+    def _log_event(self, tipo: str, peer: str = "", details: str = ""):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO network_events (timestamp, event_type, peer_address, details) "
+                "VALUES (?,?,?,?)",
+                (int(time.time()), tipo, peer, details)
+            )
+
+    def ultimos_eventos(self, n: int = 50) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM network_events ORDER BY id DESC LIMIT ?", (n,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ==================== CLOSE ====================
     def close(self):
         self.conn.close()
