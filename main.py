@@ -854,4 +854,244 @@ class CriptoAPI:
                 sender_balance = self._get_balance_unlocked(sender)
                 pending = sum(
                     float(tx["amount"]) + float(tx.get("fee", 0))
-                    for
+                    for tx in self.mempool
+                    if tx.get("sender") == sender
+                )
+                if (sender_balance - pending) < (amount + fee):
+                    return {"status": "erro",
+                            "message": f"Saldo insuficiente. Disponível: {sender_balance - pending:.6f} BRN"}
+
+                tx_payload = {
+                    "sender": sender.strip(),
+                    "receiver": receiver.strip(),
+                    "amount": amount,
+                    "fee": fee,
+                    "timestamp": time.time(),
+                }
+                sig = WalletManager.sign_transaction(spend_secret_key, tx_payload)
+                full_tx = {**tx_payload, "public_key": public_key, "signature": sig}
+
+                for e in self.mempool:
+                    if e.get("signature") == sig:
+                        return {"status": "erro", "message": "Tx duplicada"}
+
+                self.mempool.append(full_tx)
+                self._save_mempool_tx(full_tx)
+
+            threading.Thread(
+                target=self._broadcast_transaction_to_network,
+                args=(full_tx,), daemon=True
+            ).start()
+
+            return {"status": "sucesso",
+                    "message": f"Tx enviada! Taxa: {fee} BRN",
+                    "txid": sig[:16]}
+
+        except Exception as e:
+            return {"status": "erro", "message": str(e)}
+
+    def toggle_continuous_mining(self, miner_address):
+        if self.is_mining:
+            self.is_mining = False
+            self.mining_stop_event.set()
+            return {"status": "sucesso", "message": "Mineração pausada", "is_mining": False}
+
+        try:
+            self._validate_address(miner_address)
+            self.is_mining = True
+            self.mining_stop_event.clear()
+            self.miner_thread = threading.Thread(
+                target=self._continuous_mining_loop,
+                args=(miner_address,), daemon=True
+            )
+            self.miner_thread.start()
+            return {"status": "sucesso", "message": "Mineração iniciada!",
+                    "is_mining": True, "block_reward": current_reward(0)}
+        except Exception as e:
+            return {"status": "erro", "message": str(e)}
+
+    # ==========================================================
+    # LOOP DE MINERAÇÃO
+    # ==========================================================
+    def _continuous_mining_loop(self, miner_address):
+        print(f"⛏️ Mineração ativa para: {miner_address}")
+
+        while self.is_mining and not self.mining_stop_event.is_set():
+            try:
+                with self.db_lock:
+                    chain = self.db.get_raw_chain()
+                if not chain:
+                    time.sleep(1)
+                    continue
+
+                last = chain[-1]
+                next_index = last["index"] + 1
+                next_difficulty = self._calculate_next_difficulty()
+
+                emission = current_reward(next_index)
+
+                with self.mempool_lock:
+                    pending = list(self.mempool)
+
+                valid_txs = [tx for tx in pending if self._verify_tx_structure(tx)]
+
+                fees = sum(float(tx.get("fee", 0)) for tx in valid_txs)
+                fees_kept = fees * (1 - BURN_PERCENTAGE)
+                fees_burned = fees * BURN_PERCENTAGE
+                total_reward = emission + fees_kept
+
+                reward_tx = {
+                    "sender": "SISTEMA",
+                    "receiver": miner_address.strip(),
+                    "amount": total_reward,
+                    "emission": emission,
+                    "fees_kept": fees_kept,
+                    "fees_burned": fees_burned,
+                }
+
+                block_txs = [reward_tx] + valid_txs
+
+                new_block = BrunoBlock(
+                    index=next_index, previous_hash=last["hash"],
+                    transactions=block_txs, difficulty=next_difficulty,
+                )
+
+                if not new_block.mine_block(stop_event=self.mining_stop_event):
+                    continue
+                if not self.is_mining:
+                    continue
+
+                ok, msg = self._validate_block(new_block.to_dict())
+                if not ok:
+                    print(f"⚠️ Bloco rejeitado: {msg}")
+                    continue
+
+                with self.db_lock:
+                    self.db.insert_block(new_block)
+
+                with self.mempool_lock:
+                    sigs = {tx.get("signature") for tx in valid_txs if tx.get("signature")}
+                    self.mempool = [tx for tx in self.mempool if tx.get("signature") not in sigs]
+                    for sig in sigs:
+                        self._remove_mempool_tx(sig)
+
+                # ✅ Broadcast do bloco minerado
+                threading.Thread(
+                    target=self._broadcast_new_block,
+                    args=(new_block,), daemon=True
+                ).start()
+
+                print(
+                    f"✅ Bloco #{new_block.index} minerado! "
+                    f"Emissão: {emission:.6f} | Taxas: {fees_kept:.6f} | "
+                    f"Total: {total_reward:.6f} BRN"
+                )
+
+            except Exception as e:
+                print(f"⚠️ Erro na mineração: {e}")
+                time.sleep(2)
+
+        print("🛑 Mineração encerrada")
+
+
+# ============================================================
+# MODO HEADLESS
+# ============================================================
+def _run_headless(api_local, motivo=""):
+    print("=" * 60)
+    print(f"🌐 {COIN_NAME} — Nó (modo headless)")
+    print("=" * 60)
+    if motivo:
+        print(f"⚠️  {motivo}")
+    print(f"📡 Porta P2P: {api_local.p2p_port}")
+    print(f"💾 DB: {api_local.db_path}")
+    print("=" * 60)
+    print("⏳ Rodando… (Ctrl+C para parar)")
+    print()
+
+    try:
+        while True:
+            time.sleep(60)
+            altura = len(api_local.db.get_raw_chain())
+            peers = len(api_local.connected_peers)
+            mempool = len(api_local.mempool)
+            print(f"[STATUS] Altura: {altura} | Peers: {peers} | Mempool: {mempool}")
+    except KeyboardInterrupt:
+        print("\n🛑 Encerrando…")
+
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
+if __name__ == "__main__":
+    p2p_port = 6001
+
+    if len(sys.argv) > 1:
+        try:
+            p2p_port = int(sys.argv[1])
+        except ValueError:
+            pass
+
+    if "--forward" in sys.argv:
+        try:
+            AutoPortForwarder.open_port_on_router(p2p_port)
+        except Exception as e:
+            print(f"[P2P] AVISO: {e}")
+
+    if "--discover-genesis" in sys.argv:
+        print("🔍 Descobrindo nonce do gênesis…")
+        n = descobrir_nonce_genesis()
+        print(f"✅ GENESIS_NONCE = {n}")
+        sys.exit(0)
+
+    forcar_headless = "--headless" in sys.argv
+
+    api_local = CriptoAPI(p2p_port)
+
+    # Auto-descoberta LAN
+    discovery = None
+    if DISCOVERY_DISPONIVEL and not forcar_headless:
+        def ao_descobrir_peer(ip, port):
+            with api_local.peers_lock:
+                api_local.connected_peers.add((ip, port))
+            api_local._save_peer(ip, port)
+            print(f"🔗 Peer via LAN: {ip}:{port}")
+
+        discovery = AutoNodeDiscovery(
+            p2p_port=p2p_port, on_peer_found=ao_descobrir_peer,
+        )
+        discovery.run()
+
+    pode_abrir_gui = (
+        WEBVIEW_DISPONIVEL
+        and not forcar_headless
+        and os.path.exists("index.html")
+    )
+
+    try:
+        if pode_abrir_gui:
+            try:
+                webview.create_window(
+                    title=f"Carteira Nativa {COIN_NAME} (Porta: {p2p_port})",
+                    url="index.html", js_api=api_local,
+                    width=740, height=800, resizable=True,
+                )
+                webview.start()
+            except Exception as e:
+                print(f"[GUI] Falha: {e}")
+                _run_headless(api_local, f"GUI falhou: {e}")
+        else:
+            motivos = []
+            if forcar_headless:
+                motivos.append("--headless")
+            if not WEBVIEW_DISPONIVEL:
+                motivos.append("pywebview não instalado")
+            if not os.path.exists("index.html"):
+                motivos.append("index.html ausente")
+            _run_headless(api_local, ", ".join(motivos))
+    finally:
+        if discovery is not None:
+            try:
+                discovery.stop()
+            except Exception:
+                pass
